@@ -126,10 +126,10 @@ textarea{min-height:180px;resize:vertical}
       </div>
       <div class="card">
         <h3>3. Identificação</h3>
-        <label>Rastreio <span style="color:var(--err)">*</span></label>
-        <input type="text" id="rRastreio" class="cod-in" placeholder="ex.: BR269731858186C" autocapitalize="characters" autocomplete="off">
-        <label>Número do pedido (opcional)</label>
+        <label>Número do pedido <span style="color:var(--err)">*</span></label>
         <input type="text" id="rPedido" class="cod-in" placeholder="ex.: 261013H59NSDMU" autocapitalize="characters" autocomplete="off">
+        <label>Rastreio (opcional)</label>
+        <input type="text" id="rRastreio" class="cod-in" placeholder="ex.: BR269731858186C" autocapitalize="characters" autocomplete="off">
         <p class="mut" id="rLido" style="margin:6px 0 0"></p>
         <label>Observação (opcional)</label>
         <input type="text" id="rObs" placeholder="ex.: caixa amassada">
@@ -479,6 +479,7 @@ async function lerCodigoDeBarras(file) {
   const v = Parser.limpaCodigo($(id).value); $(id).value = v;
   const t = Parser.classificaCodigo(v);
   if (id === 'rPedido' && t === 'rastreio' && !$('rRastreio').value) { $('rRastreio').value = v; $('rPedido').value = ''; }
+  if (id === 'rRastreio' && t === 'pedido' && !$('rPedido').value) { $('rPedido').value = v; $('rRastreio').value = ''; }
 }));
 
 async function proximoSeq(caixa) {
@@ -495,7 +496,7 @@ $('rSalvar').onclick = async () => {
   const rastreio = Parser.limpaCodigo($('rRastreio').value) || null;
   if (!rFotos.length) return erro('Tire pelo menos uma foto.');
   if (!rCaixa) return erro('Escolha a caixa (P, M ou G).');
-  if (!rastreio) return erro('Preencha o rastreio.');
+  if (!pedido) return erro('Preencha o número do pedido.');
 
   const btn = $('rSalvar'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Salvando…';
   try {
@@ -665,8 +666,8 @@ async function editarPacote(id) {
   const { data: p } = await sb.from('pacotes').select('*').eq('id', id).single();
   abrirModal(`
     <h2>Editar ${esc(p.codigo)}</h2>
-    <label>Rastreio</label><input type="text" id="eRas" class="cod-in" value="${esc(p.rastreio || '')}">
-    <label>Pedido (opcional)</label><input type="text" id="ePed" class="cod-in" value="${esc(p.pedido || '')}">
+    <label>Pedido</label><input type="text" id="ePed" class="cod-in" value="${esc(p.pedido || '')}">
+    <label>Rastreio (opcional)</label><input type="text" id="eRas" class="cod-in" value="${esc(p.rastreio || '')}">
     <label>Loja</label><select id="eLoja"><option value="">—</option>${lojas.map(l => `<option value="${l.id}" ${l.id === p.loja_id ? 'selected' : ''}>${esc(l.nome)}</option>`).join('')}</select>
     <label>Caixa (mudar a caixa gera um código novo)</label>
     <select id="eCx">${CAIXAS.map(c => `<option value="${c.id}" ${c.id === p.caixa ? 'selected' : ''}>${c.id} · ${c.desc}</option>`).join('')}</select>
@@ -676,7 +677,7 @@ async function editarPacote(id) {
       <button class="btn sec" onclick="abrirPacote(${id})">Cancelar</button>
     </div>`);
   $('eSalvar').onclick = async () => {
-    if (!Parser.limpaCodigo($('eRas').value)) return toast('O rastreio é obrigatório');
+    if (!Parser.limpaCodigo($('ePed').value)) return toast('O número do pedido é obrigatório');
     const upd = {
       pedido: Parser.limpaCodigo($('ePed').value) || null,
       rastreio: Parser.limpaCodigo($('eRas').value) || null,
