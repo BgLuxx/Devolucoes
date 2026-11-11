@@ -815,9 +815,15 @@ async function renderLista() {
         <div class="mono">${esc(p.pedido || '')}${p.pedido && p.rastreio ? ' · ' : ''}${esc(p.rastreio || '')}</div>
         <div>${lojaTag(p.loja_id)}${m ? tipoTag(m.tipo_id) + prazoTag(m.prazo) : '<span class="mut">sem mensagem ainda</span>'}</div>
         <div class="mut">${status === 'resolvido' ? 'resolvido ' + fmtDataHora(p.resolvido_em) : 'chegou ' + fmtDataHora(p.criado_em)}</div>
+        ${status === 'pendente' ? `<button class="btn ok sm" style="margin-top:8px" data-res="${p.id}">✓ Resolvido</button>` : ''}
       </div></div>`;
   }).join('');
   $('lista').querySelectorAll('.pk').forEach(el => el.onclick = () => abrirPacote(+el.dataset.id));
+  $('lista').querySelectorAll('[data-res]').forEach(el => el.onclick = e => {
+    e.stopPropagation();
+    const p = pks.find(x => x.id === +el.dataset.res);
+    confirmarResolvido(p);
+  });
 }
 
 /* ================= DETALHE DO PACOTE ================= */
@@ -859,6 +865,22 @@ async function abrirPacote(id) {
         : `<button class="btn ok" onclick="mudarStatus(${p.id},'resolvido')">✓ Encontrado / Resolvido</button>`}
       <button class="btn sec" onclick="editarPacote(${p.id})">✏️ Editar</button>
       <button class="btn err" onclick="excluirPacote(${p.id})">🗑️ Excluir</button>
+    </div>`);
+}
+
+// Pede confirmação antes de marcar como resolvido direto pela lista
+function confirmarResolvido(p) {
+  abrirModal(`
+    <h2>Confirmar resolvido?</h2>
+    <div class="card" style="text-align:center">
+      <div class="codigo" style="margin:0">${esc(p.codigo)}</div>
+      <div class="mut">caixa ${nomeCaixa(p.caixa)}</div>
+      <div class="mono" style="margin-top:6px">${esc(p.pedido || '')}${p.pedido && p.rastreio ? ' · ' : ''}${esc(p.rastreio || '')}</div>
+    </div>
+    <p>Você confirma que <b>já fez o processo</b> deste pacote? Ele sai dos pendentes e vai para Resolvidos.</p>
+    <div style="display:grid;gap:8px">
+      <button class="btn ok" onclick="mudarStatus(${p.id},'resolvido')">✓ Confirmo, já foi feito</button>
+      <button class="btn sec" onclick="fecharModal()">Cancelar</button>
     </div>`);
 }
 
