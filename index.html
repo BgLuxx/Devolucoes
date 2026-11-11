@@ -184,6 +184,11 @@ textarea{min-height:180px;resize:vertical}
         <div id="cTesteRes"></div>
       </div>
       <div class="card">
+        <h3>Ler número do pedido pela foto</h3>
+        <label style="display:flex;align-items:center;gap:10px;color:var(--tx);font-size:15px"><input type="checkbox" id="cOcr" style="width:22px;height:22px"> Ligado</label>
+        <p class="mut">Lê o texto da etiqueta para achar o pedido. Se deixar o celular lento, desligue: o rastreio continua sendo lido pelo código de barras.</p>
+      </div>
+      <div class="card">
         <h3>Fotos dos resolvidos</h3>
         <label>Apagar as fotos depois de quantos dias resolvido? (0 = nunca)</label>
         <input type="number" id="cDias" min="0">
@@ -288,6 +293,23 @@ const Parser = (() => {
     return achados.length ? achados[0].c : null;
   }
 
+  // Procura o rastreio no texto lido da foto (corrige O→0, I→1 etc. na parte numérica)
+  function rastreioDoOCR(texto) {
+    const up = (texto || '').toUpperCase().replace(/[^A-Z0-9|\n ]+/g, ' ');
+    const dig = s => s.replace(/[OQD]/g, '0').replace(/[IL|]/g, '1').replace(/Z/g, '2').replace(/S/g, '5').replace(/B/g, '8').replace(/G/g, '6');
+    for (const linha of up.split('\n')) {
+      const toks = linha.split(' ').filter(Boolean);
+      const cands = [...toks];
+      for (let j = 0; j < toks.length - 1; j++) cands.push(toks[j] + toks[j + 1]);
+      for (const t of cands) {
+        let m;
+        if ((m = t.match(/^(BR)([0-9OQDILZSBG|]{12,13})([A-Z]?)$/))) { const c = 'BR' + dig(m[2]) + m[3]; if (classificaCodigo(c) === 'rastreio') return c; }
+        if ((m = t.match(/^([A-Z]{2})([0-9OQDILZSBG|]{9})(BR)$/))) { const c = m[1] + dig(m[2]) + 'BR'; if (classificaCodigo(c) === 'rastreio') return c; }
+      }
+    }
+    return null;
+  }
+
   function achaPorPalavra(texto, lista) {
     const T = semAcento(texto); let melhor = null, pos = Infinity;
     for (const it of lista || []) {
@@ -343,7 +365,7 @@ const Parser = (() => {
     return r;
   }
 
-  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR };
+  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR, rastreioDoOCR };
 })();
 if (typeof module !== 'undefined') module.exports = Parser;
 </script>
@@ -426,6 +448,7 @@ async function entrou(user) {
   montarReceber();
   atualizarBadge();
   limparFotosAntigas();
+  if (ocrLigado()) (window.requestIdleCallback || (f => setTimeout(f, 3000)))(() => pegarOCR().catch(() => {}));
 }
 $('cSair').onclick = async () => { await sb.auth.signOut(); location.reload(); };
 
@@ -466,6 +489,7 @@ function montarReceber() {
   ['rPedido', 'rRastreio', 'rObs'].forEach(i => $(i).value = '');
   $('rLido').textContent = ''; $('rErro').classList.add('hide');
   $('rAviso').classList.add('hide'); $('rAviso').innerHTML = '';
+  delete $('rPedido').dataset.auto; delete $('rRastreio').dataset.auto;
   renderFotos();
   $('rCaixas').innerHTML = CAIXAS.map(c => `<div class="caixa" data-c="${c.id}"><b>${c.id}</b><small>${c.desc}</small></div>`).join('');
   $('rCaixas').querySelectorAll('.caixa').forEach(el => el.onclick = () => {
@@ -482,14 +506,37 @@ function renderFotos() {
 $('rFile').onchange = async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
-  const blob = await comprimir(f);
-  rFotos.push({ blob, url: URL.createObjectURL(blob) });
+  // mostra a miniatura NA HORA; o resto é feito em segundo plano
+  const foto = { url: URL.createObjectURL(f), blob: null };
+  const bmp = decodificar(f);                       // decodifica a foto uma vez só (já reduzida)
+  foto.pronto = bmp.then(b => comprimir(b)).then(bl => (foto.blob = bl));
+  rFotos.push(foto);
   renderFotos();
-  await lerCodigoDeBarras(f);
+  const img = await bmp;
+  status('Lendo a etiqueta…', true);
+  await lerCodigoDeBarras(img, f);
   if (!$('rPedido').value) await pedidoPelaMensagem();
   verificarEspera();
-  if (!$('rPedido').value) lerPedidoDaFoto(f);
+  if ((!$('rPedido').value || !$('rRastreio').value) && ocrLigado()) lerTextoDaFoto(img);
+  else status();
 };
+
+// Linha de status embaixo dos campos (mostra o que foi lido)
+function status(carregando, spin) {
+  const lidos = [];
+  if ($('rRastreio').dataset.auto) lidos.push('rastreio');
+  if ($('rPedido').dataset.auto) lidos.push('pedido');
+  let t = lidos.length ? `✨ Lido da foto: ${lidos.join(' e ')} — confira.` : '';
+  if (carregando) t = (spin ? '<span class="spin" style="width:12px;height:12px"></span> ' : '') + esc(carregando) + (t ? '<br>' + t : '');
+  $('rLido').innerHTML = t;
+}
+function preencher(campo, valor) { $(campo).value = valor; $(campo).dataset.auto = '1'; }
+
+// Abre a foto já em tamanho menor (bem mais rápido no celular do que abrir os 12 MP inteiros)
+async function decodificar(file, lado = 1600) {
+  try { return await createImageBitmap(file, { resizeWidth: lado, resizeQuality: 'medium' }); }
+  catch { return await createImageBitmap(file); }
+}
 
 // Mostra na hora se já existe mensagem guardada esperando este pacote
 async function msgsEsperando(pedido, rastreio) {
@@ -517,8 +564,7 @@ async function pedidoPelaMensagem() {
   const r = Parser.limpaCodigo($('rRastreio').value); if (!r) return;
   const { data } = await sb.from('mensagens').select('pedido').eq('rastreio', r).not('pedido', 'is', null).limit(1);
   if (data && data.length && !$('rPedido').value) {
-    $('rPedido').value = data[0].pedido;
-    $('rLido').textContent = '✨ Pedido puxado da mensagem já recebida — confira.';
+    preencher('rPedido', data[0].pedido);
   }
 }
 
@@ -531,14 +577,15 @@ async function pegarOCR() {
   if (ocrWorker) return ocrWorker;
   if (!ocrCarregando) ocrCarregando = (async () => {
     if (!window.Tesseract) await carregarScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
-    const w = await Tesseract.createWorker('eng');
+    let w;
+    try { w = await Tesseract.createWorker('eng', 1, { langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast' }); }
+    catch { w = await Tesseract.createWorker('eng'); }
     await w.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:#º°-/ ' });
     ocrWorker = w; return w;
   })();
   return ocrCarregando;
 }
-async function imagemParaOCR(file, max = 2000) {
-  const img = await createImageBitmap(file);
+async function imagemParaOCR(img, max = 1300) {
   const k = Math.min(1, max / Math.max(img.width, img.height));
   const c = document.createElement('canvas');
   c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
@@ -547,24 +594,27 @@ async function imagemParaOCR(file, max = 2000) {
   return c;
 }
 let ocrFila = 0;
-async function lerPedidoDaFoto(file) {
+async function lerTextoDaFoto(img) {
   const minha = ++ocrFila;
-  $('rLido').innerHTML = '<span class="spin" style="width:12px;height:12px"></span> Procurando o número do pedido na foto…';
+  status('Procurando os números na foto…', true);
   try {
     const w = await pegarOCR();
-    const { data } = await w.recognize(await imagemParaOCR(file));
-    if (minha !== ocrFila && $('rPedido').value) return;
-    const ped = Parser.pedidoDoOCR(data.text);
-    if (ped && !$('rPedido').value) { $('rPedido').value = ped; $('rLido').textContent = '✨ Pedido lido da foto — confira se está certo.'; verificarEspera(); }
-    else if (!$('rPedido').value && minha === ocrFila) $('rLido').textContent = 'Não consegui ler o pedido nesta foto. Tire outra mais de perto ou digite.';
+    if ($('rPedido').value && $('rRastreio').value) { if (minha === ocrFila) status(); return; }
+    const { data } = await w.recognize(await imagemParaOCR(img));
+    if (minha !== ocrFila) return;
+    const ped = Parser.pedidoDoOCR(data.text), ras = Parser.rastreioDoOCR(data.text);
+    if (ped && !$('rPedido').value) preencher('rPedido', ped);
+    if (ras && !$('rRastreio').value) preencher('rRastreio', ras);
+    if (!$('rPedido').value) status('Não consegui ler o pedido nesta foto. Tire outra mais de perto ou digite.');
+    else status();
+    verificarEspera();
   } catch (e) {
     console.error(e);
-    if (minha === ocrFila && !$('rPedido').value) $('rLido').textContent = 'Não consegui ler o pedido na foto. Digite, por favor.';
+    if (minha === ocrFila) status($('rPedido').value ? '' : 'Não consegui ler o pedido na foto. Digite, por favor.');
   }
 }
 
-async function comprimir(file, max = 1400, q = 0.72) {
-  const img = await createImageBitmap(file);
+async function comprimir(img, max = 1280, q = 0.68) {
   const k = Math.min(1, max / Math.max(img.width, img.height));
   const c = document.createElement('canvas');
   c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
@@ -572,22 +622,46 @@ async function comprimir(file, max = 1400, q = 0.72) {
   return new Promise(r => c.toBlob(r, 'image/jpeg', q));
 }
 
-// Se o celular suportar, tenta ler o código de barras da etiqueta direto da foto
-async function lerCodigoDeBarras(file) {
+// Se o celular suportar, lê o código de barras / QR da etiqueta direto da foto
+let detector = null;
+async function pegarDetector() {
+  if (detector) return detector;
+  let formatos;
+  try { formatos = await BarcodeDetector.getSupportedFormats(); } catch {}
+  detector = formatos && formatos.length ? new BarcodeDetector({ formats: formatos }) : new BarcodeDetector();
+  return detector;
+}
+async function lerCodigoDeBarras(img, file) {
   if (!('BarcodeDetector' in window)) return;
-  try {
-    const det = new BarcodeDetector();
-    const codes = await det.detect(await createImageBitmap(file));
+  const aplicar = codes => {
     for (const c of codes) {
       const v = Parser.limpaCodigo(c.rawValue);
-      const tipo = Parser.classificaCodigo(v);
-      if (tipo === 'rastreio' && !$('rRastreio').value) { $('rRastreio').value = v; $('rLido').textContent = '✨ Rastreio lido do código de barras da foto — confira.'; }
-      if (tipo === 'pedido' && !$('rPedido').value) { $('rPedido').value = v; $('rLido').textContent = '✨ Pedido lido do código de barras da foto — confira.'; }
+      let tipo = Parser.classificaCodigo(v);
+      // alguns QR codes trazem mais texto: procura os números dentro
+      if (!tipo) {
+        const cs = Parser.codigos(c.rawValue || '');
+        if (cs.rastreios[0] && !$('rRastreio').value) preencher('rRastreio', cs.rastreios[0]);
+        if (cs.pedidos[0] && !$('rPedido').value) preencher('rPedido', cs.pedidos[0]);
+        continue;
+      }
+      if (tipo === 'rastreio' && !$('rRastreio').value) preencher('rRastreio', v);
+      if (tipo === 'pedido' && !$('rPedido').value) preencher('rPedido', v);
     }
-  } catch (e) { /* sem suporte ou sem código — tudo bem */ }
+  };
+  try {
+    const det = await pegarDetector();
+    aplicar(await det.detect(img));
+    // barras finas às vezes somem na foto reduzida: tenta de novo com mais resolução
+    if (!$('rRastreio').value && file) {
+      let grande; try { grande = await createImageBitmap(file, { resizeWidth: 2600, resizeQuality: 'high' }); } catch { grande = await createImageBitmap(file); }
+      aplicar(await det.detect(grande));
+      grande.close && grande.close();
+    }
+  } catch (e) { console.warn('código de barras:', e); }
 }
 
 // Se colar um rastreio no campo de pedido (ou vice-versa), corrige sozinho
+['rPedido', 'rRastreio'].forEach(id => $(id).addEventListener('input', () => { delete $(id).dataset.auto; }));
 ['rPedido', 'rRastreio'].forEach(id => $(id).addEventListener('blur', () => {
   const v = Parser.limpaCodigo($(id).value); $(id).value = v;
   const t = Parser.classificaCodigo(v);
@@ -613,46 +687,39 @@ $('rSalvar').onclick = async () => {
   if (!pedido) return erro('Preencha o número do pedido.');
 
   const btn = $('rSalvar'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Salvando…';
+  const caixa = rCaixa, fotos = rFotos.slice(), obs = $('rObs').value.trim() || null;
   try {
-    // já existe pendente com esse código?
     const filtros = [pedido && `pedido.eq.${pedido}`, rastreio && `rastreio.eq.${rastreio}`].filter(Boolean).join(',');
-    const { data: dup } = await sb.from('pacotes').select('codigo').eq('status', 'pendente').or(filtros).limit(1);
+    // tudo ao mesmo tempo, em vez de um depois do outro
+    const [dupR, seq, msgsR] = await Promise.all([
+      sb.from('pacotes').select('codigo').eq('status', 'pendente').or(filtros).limit(1),
+      proximoSeq(caixa),
+      sb.from('mensagens').select('*').is('pacote_id', null).or(filtros),
+    ]);
+    const dup = dupR.data, msgs = msgsR.data || [];
     if (dup && dup.length && !confirm(`Já existe um pacote pendente com esse número (${dup[0].codigo}). Salvar mesmo assim?`)) return;
 
-    const paths = [];
-    for (const f of rFotos) {
-      const p = `${new Date().toISOString().slice(0, 10)}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
-      const { error } = await sb.storage.from(BUCKET).upload(p, f.blob, { contentType: 'image/jpeg' });
-      if (error) throw error;
-      paths.push(p);
+    // os nomes das fotos são definidos agora; o envio acontece em segundo plano
+    const dia = new Date().toISOString().slice(0, 10);
+    const paths = fotos.map(() => `${dia}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+    const codigo = `${caixa}-${String(seq).padStart(2, '0')}`;
+    const novo = { caixa, seq, codigo, pedido, rastreio, fotos: paths, obs, criado_por: usuario };
+    if (msgs.length) {
+      const loja = msgs.find(m => m.loja_id)?.loja_id; if (loja) novo.loja_id = loja;
+      if (!novo.rastreio && msgs.find(m => m.rastreio)) novo.rastreio = msgs.find(m => m.rastreio).rastreio;
     }
-    const seq = await proximoSeq(rCaixa);
-    const codigo = `${rCaixa}-${String(seq).padStart(2, '0')}`;
-    const { data: pk, error } = await sb.from('pacotes').insert({
-      caixa: rCaixa, seq, codigo, pedido, rastreio, fotos: paths, obs: $('rObs').value.trim() || null, criado_por: usuario
-    }).select().single();
+    const { data: pk, error } = await sb.from('pacotes').insert(novo).select('id').single();
     if (error) throw error;
+    if (msgs.length) sb.from('mensagens').update({ pacote_id: pk.id }).in('id', msgs.map(m => m.id)).then(() => {});
+    enviarFotos(fotos, paths, pk.id);   // não espera: já pode ir para a próxima devolução
 
-    // há mensagens esperando por esse pacote?
-    const { data: msgs } = await sb.from('mensagens').select('*').is('pacote_id', null).or(filtros);
-    if (msgs && msgs.length) {
-      await sb.from('mensagens').update({ pacote_id: pk.id }).in('id', msgs.map(m => m.id));
-      const loja = msgs.find(m => m.loja_id)?.loja_id;
-      const upd = {};
-      if (loja) upd.loja_id = loja;
-      if (!pk.pedido && msgs.find(m => m.pedido)) upd.pedido = msgs.find(m => m.pedido).pedido;
-      if (!pk.rastreio && msgs.find(m => m.rastreio)) upd.rastreio = msgs.find(m => m.rastreio).rastreio;
-      if (Object.keys(upd).length) await sb.from('pacotes').update(upd).eq('id', pk.id);
-    }
-
-    rFotos.forEach(f => URL.revokeObjectURL(f.url));
     montarReceber(); atualizarBadge();
     abrirModal(`
       <div class="alert ok">✅ Devolução salva!</div>
       <p class="mut" style="text-align:center;margin:0">Escreva no pacote:</p>
       <div class="codigo">${codigo}</div>
-      <p style="text-align:center;margin-top:0">e coloque na caixa <b>${nomeCaixa(rCaixa || pk.caixa)}</b></p>
-      ${msgs && msgs.length ? (() => { const t = tipos.find(x => x.id === msgs[0].tipo_id); return `<div class="aviso-msg">
+      <p style="text-align:center;margin-top:0">e coloque na caixa <b>${nomeCaixa(caixa)}</b></p>
+      ${msgs.length ? (() => { const t = tipos.find(x => x.id === msgs[0].tipo_id); return `<div class="aviso-msg">
         <div class="big">🔔 Este pacote já tinha mensagem esperando!</div>
         <div style="margin:6px 0">${tipoTag(msgs[0].tipo_id)}${lojaTag(msgs[0].loja_id)}${prazoTag(msgs[0].prazo)}</div>
         <div class="mut">${esc(msgs[0].produto || '')}${msgs[0].motivo ? ' · ' + esc(msgs[0].motivo) : ''}</div>
@@ -668,6 +735,37 @@ $('rSalvar').onclick = async () => {
     btn.disabled = false; btn.textContent = 'Salvar devolução';
   }
 };
+
+/* ---------- envio das fotos em segundo plano ---------- */
+let envios = 0;
+function indicadorEnvio() {
+  let el = $('envioPill');
+  if (!el) { el = document.createElement('div'); el.id = 'envioPill'; el.className = 'toast'; el.style.bottom = '140px'; document.body.appendChild(el); }
+  if (envios > 0) { el.innerHTML = `<span class="spin" style="width:12px;height:12px"></span> Enviando fotos… (${envios})`; el.style.display = ''; }
+  else el.style.display = 'none';
+}
+async function enviarFotos(fotos, paths, pacoteId) {
+  envios += fotos.length; indicadorEnvio();
+  const falhas = [];
+  await Promise.all(fotos.map(async (f, i) => {
+    try {
+      await f.pronto;
+      let ok = false;
+      for (let t = 0; t < 3 && !ok; t++) {
+        const { error } = await sb.storage.from(BUCKET).upload(paths[i], f.blob, { contentType: 'image/jpeg', upsert: true });
+        ok = !error; if (!ok) await new Promise(r => setTimeout(r, 1500 * (t + 1)));
+      }
+      if (!ok) falhas.push(paths[i]); else URL.revokeObjectURL(f.url);
+    } catch { falhas.push(paths[i]); }
+    finally { envios--; indicadorEnvio(); }
+  }));
+  if (falhas.length) {
+    const resta = paths.filter(p => !falhas.includes(p));
+    await sb.from('pacotes').update({ fotos: resta }).eq('id', pacoteId);
+    toast(`⚠️ ${falhas.length} foto(s) não foram enviadas (sem internet?). O pacote foi salvo; tire a foto de novo pelo Editar se precisar.`, 6000);
+  }
+}
+window.addEventListener('beforeunload', e => { if (envios > 0) { e.preventDefault(); e.returnValue = ''; } });
 
 /* ================= LISTAS ================= */
 let buscaTimer;
@@ -931,10 +1029,13 @@ function renderCfg() {
     <div style="flex:1"><b>${esc(l.nome)}</b><div class="mut">palavra-chave: “${esc(l.palavra_chave)}”</div></div>
     <button class="btn sec sm" onclick="editarLoja(${l.id})">Editar</button></div>`).join('') || '<p class="mut">Nenhuma loja.</p>';
   $('cDias').value = diasFotos();
+  $('cOcr').checked = ocrLigado();
 }
 $('cNovoTipo').onclick = () => editarTipo(null);
 $('cNovaLoja').onclick = () => editarLoja(null);
 $('cDias').onchange = () => { try { localStorage.setItem('diasFotos', $('cDias').value); } catch {} toast('Salvo'); };
+function ocrLigado() { try { return localStorage.getItem('ocr') !== '0'; } catch { return true; } }
+$('cOcr').onchange = () => { try { localStorage.setItem('ocr', $('cOcr').checked ? '1' : '0'); } catch {} toast('Salvo'); if ($('cOcr').checked) pegarOCR().catch(() => {}); };
 function diasFotos() { try { const v = localStorage.getItem('diasFotos'); return v === null ? 30 : +v; } catch { return 30; } }
 
 function editarTipo(id) {
