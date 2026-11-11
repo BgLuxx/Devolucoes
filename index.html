@@ -86,6 +86,8 @@ textarea{min-height:180px;resize:vertical}
 .item-cfg{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd)}
 .item-cfg:last-child{border-bottom:0}
 .dot{width:14px;height:14px;border-radius:50%;flex:none}
+.aviso-msg{background:#fef2f2;border:2px solid var(--err);border-radius:14px;padding:14px;margin-bottom:12px}
+.aviso-msg .big{color:#991b1b}
 .cod-in{text-transform:uppercase}
 .cod-in::placeholder{text-transform:none}
 </style>
@@ -114,6 +116,7 @@ textarea{min-height:180px;resize:vertical}
 
     <!-- RECEBER -->
     <div id="pgReceber">
+      <div id="rAviso" class="hide"></div>
       <div class="card">
         <h3>1. Fotos do pacote</h3>
         <div class="fotos" id="rFotos"></div>
@@ -462,6 +465,7 @@ function montarReceber() {
   rFotos = []; rCaixa = '';
   ['rPedido', 'rRastreio', 'rObs'].forEach(i => $(i).value = '');
   $('rLido').textContent = ''; $('rErro').classList.add('hide');
+  $('rAviso').classList.add('hide'); $('rAviso').innerHTML = '';
   renderFotos();
   $('rCaixas').innerHTML = CAIXAS.map(c => `<div class="caixa" data-c="${c.id}"><b>${c.id}</b><small>${c.desc}</small></div>`).join('');
   $('rCaixas').querySelectorAll('.caixa').forEach(el => el.onclick = () => {
@@ -483,8 +487,30 @@ $('rFile').onchange = async e => {
   renderFotos();
   await lerCodigoDeBarras(f);
   if (!$('rPedido').value) await pedidoPelaMensagem();
+  verificarEspera();
   if (!$('rPedido').value) lerPedidoDaFoto(f);
 };
+
+// Mostra na hora se já existe mensagem guardada esperando este pacote
+async function msgsEsperando(pedido, rastreio) {
+  const filtros = [pedido && `pedido.eq.${pedido}`, rastreio && `rastreio.eq.${rastreio}`].filter(Boolean).join(',');
+  if (!filtros) return [];
+  const { data } = await sb.from('mensagens').select('*').is('pacote_id', null).or(filtros).order('criado_em', { ascending: false });
+  return data || [];
+}
+async function verificarEspera() {
+  const msgs = await msgsEsperando(Parser.limpaCodigo($('rPedido').value), Parser.limpaCodigo($('rRastreio').value));
+  if (!msgs.length) { $('rAviso').classList.add('hide'); return; }
+  const m = msgs[0], t = tipos.find(x => x.id === m.tipo_id);
+  $('rAviso').innerHTML = `<div class="aviso-msg">
+    <div class="big">🔔 Este pacote já tem mensagem esperando!</div>
+    <div style="margin:6px 0">${tipoTag(m.tipo_id)}${lojaTag(m.loja_id)}${prazoTag(m.prazo)}</div>
+    <div class="mut">${esc(m.produto || '')}${m.motivo ? ' · ' + esc(m.motivo) : ''}</div>
+    ${t && t.instrucao ? `<div class="alert" style="margin-bottom:0">👉 ${esc(t.instrucao)}</div>` : ''}
+  </div>`;
+  $('rAviso').classList.remove('hide');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 
 // Se o rastreio já foi lido e existe mensagem guardada com ele, puxa o pedido da mensagem
 async function pedidoPelaMensagem() {
@@ -529,7 +555,7 @@ async function lerPedidoDaFoto(file) {
     const { data } = await w.recognize(await imagemParaOCR(file));
     if (minha !== ocrFila && $('rPedido').value) return;
     const ped = Parser.pedidoDoOCR(data.text);
-    if (ped && !$('rPedido').value) { $('rPedido').value = ped; $('rLido').textContent = '✨ Pedido lido da foto — confira se está certo.'; }
+    if (ped && !$('rPedido').value) { $('rPedido').value = ped; $('rLido').textContent = '✨ Pedido lido da foto — confira se está certo.'; verificarEspera(); }
     else if (!$('rPedido').value && minha === ocrFila) $('rLido').textContent = 'Não consegui ler o pedido nesta foto. Tire outra mais de perto ou digite.';
   } catch (e) {
     console.error(e);
@@ -567,6 +593,7 @@ async function lerCodigoDeBarras(file) {
   const t = Parser.classificaCodigo(v);
   if (id === 'rPedido' && t === 'rastreio' && !$('rRastreio').value) { $('rRastreio').value = v; $('rPedido').value = ''; }
   if (id === 'rRastreio' && t === 'pedido' && !$('rPedido').value) { $('rPedido').value = v; $('rRastreio').value = ''; }
+  verificarEspera();
 }));
 
 async function proximoSeq(caixa) {
@@ -625,8 +652,16 @@ $('rSalvar').onclick = async () => {
       <p class="mut" style="text-align:center;margin:0">Escreva no pacote:</p>
       <div class="codigo">${codigo}</div>
       <p style="text-align:center;margin-top:0">e coloque na caixa <b>${nomeCaixa(rCaixa || pk.caixa)}</b></p>
-      ${msgs && msgs.length ? `<div class="alert">⚠️ Já existe ${msgs.length > 1 ? 'mensagens' : 'mensagem'} sobre este pacote! ${tipoTag(msgs[0].tipo_id)} ${prazoTag(msgs[0].prazo)}<br>Veja em Pendentes.</div>` : ''}
-      <button class="btn" onclick="fecharModal()">OK, próxima</button>`);
+      ${msgs && msgs.length ? (() => { const t = tipos.find(x => x.id === msgs[0].tipo_id); return `<div class="aviso-msg">
+        <div class="big">🔔 Este pacote já tinha mensagem esperando!</div>
+        <div style="margin:6px 0">${tipoTag(msgs[0].tipo_id)}${lojaTag(msgs[0].loja_id)}${prazoTag(msgs[0].prazo)}</div>
+        <div class="mut">${esc(msgs[0].produto || '')}${msgs[0].motivo ? ' · ' + esc(msgs[0].motivo) : ''}</div>
+        ${t && t.instrucao ? `<div class="alert" style="margin-bottom:0">👉 ${esc(t.instrucao)}</div>` : ''}
+        <p class="mut" style="margin:8px 0 0">Faça o processo agora. Se já resolveu, toque no botão verde.</p></div>
+        <div style="display:grid;gap:8px">
+          <button class="btn ok" onclick="mudarStatus(${pk.id},'resolvido')">✓ Já fiz o processo — Resolvido</button>
+          <button class="btn sec" onclick="fecharModal()">Deixar pendente na caixa</button></div>`; })()
+      : `<button class="btn" onclick="fecharModal()">OK, próxima</button>`}`);
   } catch (e) {
     console.error(e); erro('Erro ao salvar: ' + (e.message || e));
   } finally {
