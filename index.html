@@ -89,6 +89,12 @@ textarea{min-height:180px;resize:vertical}
 .aviso-msg{background:#fef2f2;border:2px solid var(--err);border-radius:14px;padding:14px;margin-bottom:12px}
 .aviso-msg .big{color:#991b1b}
 .cod-in{text-transform:uppercase}
+.cod-in.duvida{border:2px solid #f59e0b;background:#fffbeb}
+.dup-box{background:#fef2f2;border:2px solid var(--err);border-radius:14px;padding:14px;margin-bottom:12px}
+.dup-box .big{color:#991b1b}
+.sit{display:inline-block;font-weight:800;font-size:13px;padding:3px 10px;border-radius:8px;margin:4px 0 2px}
+.sit.venc{background:#fee2e2;color:#991b1b}.sit.hoje{background:#ffedd5;color:#9a3412}
+.sit.ok{background:#dcfce7;color:#166534}.sit.nada{background:#f1f5f9;color:#475569}
 .cod-in::placeholder{text-transform:none}
 </style>
 </head>
@@ -129,9 +135,12 @@ textarea{min-height:180px;resize:vertical}
       </div>
       <div class="card">
         <h3>3. Identificação</h3>
-        <label>Número do pedido <span style="color:var(--err)">*</span></label>
+        <div class="mut" style="margin-bottom:6px">Tipo de etiqueta <span style="opacity:.8">(o sistema escolhe sozinho pela foto)</span></div>
+        <div class="chips" id="rCanal" style="margin-bottom:2px"></div>
+        <p class="mut" id="rDica" style="margin:4px 0 0"></p>
+        <label id="lPed">Número do pedido <span style="color:var(--err)">*</span></label>
         <input type="text" id="rPedido" class="cod-in" placeholder="ex.: 261013H59NSDMU" autocapitalize="characters" autocomplete="off">
-        <label>Rastreio (opcional)</label>
+        <label id="lRas">Rastreio (opcional)</label>
         <input type="text" id="rRastreio" class="cod-in" placeholder="ex.: BR269731858186C" autocapitalize="characters" autocomplete="off">
         <p class="mut" id="rLido" style="margin:6px 0 0"></p>
         <label>Observação (opcional)</label>
@@ -146,6 +155,7 @@ textarea{min-height:180px;resize:vertical}
       <input type="text" id="fBusca" placeholder="🔎 Buscar pedido, rastreio, código…" autocomplete="off" style="margin-bottom:10px">
       <div class="chips" id="fCaixa"></div>
       <div class="chips" id="fLoja"></div>
+      <div class="chips" id="fSit"></div>
       <div id="lista"></div>
     </div>
 
@@ -221,12 +231,33 @@ const Parser = (() => {
   // Rastreios: Shopee Xpress (BR + 12/13 dígitos + letra opcional) e Correios (AA123456789BR)
   const RE_RASTREIOS = [/\b(BR\d{12,13}[A-Z]?)\b/g, /\b([A-Z]{2}\d{9}[A-Z]{2})\b/g];
 
+  // Mercado Livre: número da venda (16 dígitos começando com 2000) e número do envio (10–12 dígitos, só com a palavra "envio" perto)
+  const RE_VENDA_ML = /\b(2000\d{12})\b/g;
+  const RE_ENVIO_ML = /(?:ENVIO|SHIPMENT)\D{0,20}?(?<![A-Z0-9])(\d{10,12})\b/g;
+
   function codigos(texto) {
     const up = (texto || '').toUpperCase();
-    const pedidos = [...new Set([...up.matchAll(RE_PEDIDO)].map(m => m[1]))];
+    const pedidos = [...new Set([...up.matchAll(RE_PEDIDO), ...up.matchAll(RE_VENDA_ML)].map(m => m[1]))];
     const rastreios = [];
     RE_RASTREIOS.forEach(re => [...up.matchAll(re)].forEach(m => { if (!rastreios.includes(m[1])) rastreios.push(m[1]); }));
+    [...up.matchAll(RE_ENVIO_ML)].forEach(m => { if (!rastreios.includes(m[1])) rastreios.push(m[1]); });
     return { pedidos, rastreios };
+  }
+
+  // De qual tipo de etiqueta é este código?
+  function canalDoCodigo(c) {
+    c = limpaCodigo(c); if (!c) return null;
+    if (/^2000\d{12}$/.test(c) || /^\d{10,12}$/.test(c)) return 'ml';
+    if (/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(c)) return 'correios';
+    if (/^BR\d{12,13}[A-Z]?$/.test(c) || classificaCodigo(c) === 'pedido') return 'shopee';
+    return null;
+  }
+  function canalDoTexto(texto) {
+    const T = semAcento(texto);
+    if (/MERCADO\s*LIVRE|MERCADOLIVRE|MERCADO\s*ENVIOS|\bVENDA\s*:/.test(T)) return 'ml';
+    if (/CORREIOS|PAC\s*REVERSO|SEDEX/.test(T)) return 'correios';
+    if (/SHOPEE|XPRESS/.test(T)) return 'shopee';
+    return null;
   }
 
   function classificaCodigo(c) {
@@ -234,6 +265,8 @@ const Parser = (() => {
     if (!c) return null;
     if (RE_RASTREIOS.some(re => new RegExp('^' + re.source.replace(/\\b/g, '') + '$').test(c))) return 'rastreio';
     if (new RegExp('^' + RE_PEDIDO.source.replace(/\\b/g, '') + '$').test(c)) return 'pedido';
+    if (/^2000\d{12}$/.test(c)) return 'pedido';          // venda Mercado Livre
+    if (/^\d{10,12}$/.test(c)) return 'rastreio';         // nº do envio Mercado Livre
     return null;
   }
 
@@ -278,12 +311,17 @@ const Parser = (() => {
     const achados = [];
     const linhas = up.split(/\n/);
     linhas.forEach((linha, i) => {
-      const perto = /PEDIDO|ORDER|N[º°O]?\s*DO\s*PEDIDO|ID/.test(linha) || /PEDIDO|ORDER/.test(linhas[i - 1] || '');
+      const perto = /PEDIDO|ORDER|VENDA|N[º°O]?\s*DO\s*PEDIDO|ID/.test(linha) || /PEDIDO|ORDER|VENDA/.test(linhas[i - 1] || '');
       const toks = linha.replace(/[^A-Z0-9|]+/g, ' ').split(' ').filter(Boolean);
       // junta pedaços vizinhos (o OCR às vezes separa o número em dois)
       const cands = [...toks];
       for (let j = 0; j < toks.length - 1; j++) cands.push(toks[j] + toks[j + 1]);
       for (const t of cands) {
+        if (t.length === 16 && /^[0-9OQDILZSBG|]{16}$/.test(t)) {        // venda do Mercado Livre
+          const c = fix6(t);
+          if (/^2000\d{12}$/.test(c)) achados.push({ c, perto: perto || /VENDA/.test(linha) });
+          continue;
+        }
         if (t.length !== 14) continue;
         const c = fix6(t.slice(0, 6)) + t.slice(6).replace(/\|/g, '1');
         if (classificaCodigo(c) === 'pedido') achados.push({ c, perto });
@@ -305,6 +343,15 @@ const Parser = (() => {
         let m;
         if ((m = t.match(/^(BR)([0-9OQDILZSBG|]{12,13})([A-Z]?)$/))) { const c = 'BR' + dig(m[2]) + m[3]; if (classificaCodigo(c) === 'rastreio') return c; }
         if ((m = t.match(/^([A-Z]{2})([0-9OQDILZSBG|]{9})(BR)$/))) { const c = m[1] + dig(m[2]) + 'BR'; if (classificaCodigo(c) === 'rastreio') return c; }
+      }
+      // código impresso com espaços, ex.: "AP 584 030 949 BR"
+      const junto = linha.replace(/ /g, '');
+      const qtdDig = s => (s.match(/\d/g) || []).length;
+      for (const m of junto.matchAll(/([A-Z]{2})([0-9OQDILZSBG|]{9})BR/g)) {
+        if (qtdDig(m[2]) >= 6) { const c = m[1] + dig(m[2]) + 'BR'; if (classificaCodigo(c) === 'rastreio') return c; }
+      }
+      for (const m of junto.matchAll(/BR([0-9OQDILZSBG|]{12,13})([A-Z]?)/g)) {
+        if (qtdDig(m[1]) >= 10) { const c = 'BR' + dig(m[1]) + m[2]; if (classificaCodigo(c) === 'rastreio') return c; }
       }
     }
     return null;
@@ -338,6 +385,7 @@ const Parser = (() => {
       rastreio: c.rastreios[0] || null,
       tipo: achaPorPalavra(texto, tipos),
       loja: achaPorPalavra(texto, lojas),
+      canal: null,
       cliente: null, produto: null, motivo: null, prazo: null
     };
     let m;
@@ -357,6 +405,7 @@ const Parser = (() => {
     }
 
     if ((m = texto.match(/Motivo(?:\s+alegado)?:\s*([^\n|]+)/i))) r.motivo = m[1].trim();
+    r.canal = canalDoCodigo(r.pedido) === 'ml' ? 'ml' : (canalDoTexto(texto) || canalDoCodigo(r.pedido) || canalDoCodigo(r.rastreio));
 
     if ((m = texto.match(/prazo\s*(?:at[eé])?\s*:?\s*(\d{1,2}\/\d{1,2})/i))) r.prazo = data(m[1], hoje);
     else if ((m = texto.match(/vence\s+hoje\s*(\d{1,2}\/\d{1,2})/i))) r.prazo = data(m[1], hoje);
@@ -365,7 +414,12 @@ const Parser = (() => {
     return r;
   }
 
-  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR, rastreioDoOCR };
+  // true se o código aparece igualzinho no texto lido (sem precisar corrigir letra/número)
+  function apareceExato(texto, codigo) {
+    const junto = (texto || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return !!codigo && junto.includes(codigo);
+  }
+  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR, rastreioDoOCR, canalDoCodigo, canalDoTexto, apareceExato };
 })();
 if (typeof module !== 'undefined') module.exports = Parser;
 </script>
@@ -386,13 +440,33 @@ const CAIXAS = [
 ];
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const CANAIS = [
+  { id: 'shopee',   nome: 'Shopee',        cor: '#ee4d2d' },
+  { id: 'correios', nome: 'Correios',      cor: '#00416b' },
+  { id: 'ml',       nome: 'Mercado Livre', cor: '#2968c8' },
+];
+const CAMPOS = {
+  shopee:   { ped: 'Número do pedido', pedPh: 'ex.: 261013H59NSDMU', ras: 'Rastreio', rasPh: 'ex.: BR269731858186C', obrig: 'ped',
+              dica: 'Fotos: 1) número do pedido de perto · 2) etiqueta inteira · 3) a caixa.' },
+  correios: { ped: 'Número do pedido', pedPh: 'não vem na etiqueta dos Correios', ras: 'Rastreio (AP…BR)', rasPh: 'ex.: AP584030949BR', obrig: 'ras',
+              dica: 'Fotos: 1) código de barras do rastreio (AP…BR) bem reto · 2) etiqueta inteira · 3) a caixa.' },
+  ml:       { ped: 'Número da venda', pedPh: 'ex.: 2000019204889854', ras: 'Nº do envio', rasPh: 'lido do código de barras', obrig: 'algum',
+              dica: 'Fotos: 1) topo da etiqueta com "Venda:" e o código de barras · 2) etiqueta inteira · 3) a caixa.' },
+};
+const canalTag = id => { const c = CANAIS.find(x => x.id === id); return c ? `<span class="tag" style="background:${c.cor}">${c.nome}</span>` : ''; };
+// o que falta preencher para este tipo de etiqueta (ou null se está ok)
+function faltaPara(canal, pedido, rastreio) {
+  if (canal === 'correios') return rastreio ? null : 'o rastreio (AP…BR)';
+  if (canal === 'ml') return pedido || rastreio ? null : 'o número da venda (ou o nº do envio)';
+  return pedido ? null : 'o número do pedido';
+}
 const nomeCaixa = id => (CAIXAS.find(c => c.id === id) || {}).nome || id;
 const fmtData = d => d ? new Date(d).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '';
 const fmtDataHora = d => d ? new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
 const fmtPrazo = iso => iso ? iso.split('-').reverse().slice(0, 2).join('/') : '';
 
 let usuario = null, tipos = [], lojas = [], pagina = 'receber';
-let filtroCaixa = '', filtroLoja = '';
+let filtroCaixa = '', filtroLoja = '', filtroSit = '';
 const urlCache = {};
 
 function toast(t, ms = 2500) {
@@ -403,6 +477,31 @@ function diasAte(iso) {
   if (!iso) return null;
   const h = new Date(); h.setHours(0, 0, 0, 0);
   return Math.round((new Date(iso + 'T00:00:00') - h) / 86400000);
+}
+// Tipo de mensagem que significa "prazo acabou" (ex.: PRAZO ENCERRADO)
+function tipoVencido(t) {
+  if (!t) return false;
+  if (t.marca_vencido === true || t.marca_vencido === false) return t.marca_vencido;
+  return /ENCERRAD|VENCID/.test(Parser.semAcento((t.nome || '') + ' ' + (t.palavra_chave || '')));
+}
+// Situação do prazo de um pacote, a partir de todas as mensagens dele
+function situacao(msgs) {
+  if (!msgs || !msgs.length) return { k: 'sem', ord: 4 };
+  const encerrado = msgs.some(m => tipoVencido(tipos.find(x => x.id === m.tipo_id)));
+  const prazos = msgs.map(m => m.prazo).filter(Boolean).sort();
+  const prazo = prazos[prazos.length - 1] || null;           // o maior prazo informado
+  const d = prazo ? diasAte(prazo) : null;
+  if (encerrado || (d !== null && d < 0)) return { k: 'venc', ord: 2, prazo, d };
+  if (d === 0) return { k: 'hoje', ord: 0, prazo, d };
+  if (d !== null) return { k: 'ok', ord: 1, prazo, d };
+  return { k: 'semdata', ord: 3 };
+}
+function situacaoHtml(s) {
+  if (s.k === 'venc') return `<div class="sit venc">⛔ VENCIDO${s.prazo ? ' em ' + fmtPrazo(s.prazo) : ''} — pode abrir e voltar ao estoque</div>`;
+  if (s.k === 'hoje') return `<div class="sit hoje">⚠️ VENCE HOJE — fazer agora</div>`;
+  if (s.k === 'ok') return `<div class="sit ok">🟢 No prazo · até ${fmtPrazo(s.prazo)} (${s.d} dia${s.d > 1 ? 's' : ''})</div>`;
+  if (s.k === 'semdata') return `<div class="sit nada">Mensagem sem data de prazo</div>`;
+  return `<div class="sit nada">⏳ Sem mensagem ainda — prazo desconhecido</div>`;
 }
 function prazoTag(iso) {
   const d = diasAte(iso); if (d === null) return '';
@@ -483,13 +582,38 @@ async function atualizarBadge() {
 }
 
 /* ================= RECEBER ================= */
-let rFotos = [], rCaixa = '';
+let rFotos = [], rCaixa = '', rCanal = 'shopee', rCanalManual = false;
+function setCanal(id, manual) {
+  if (!manual && rCanalManual) return;
+  if (manual) rCanalManual = true;
+  rCanal = id;
+  const cfg = CAMPOS[id], est = ' <span style="color:var(--err)">*</span>';
+  $('lPed').innerHTML = cfg.ped + (cfg.obrig === 'ped' || cfg.obrig === 'algum' ? est : ' (opcional)');
+  $('lRas').innerHTML = cfg.ras + (cfg.obrig === 'ras' ? est : cfg.obrig === 'algum' ? ' (ou este)' : ' (opcional)');
+  $('rPedido').placeholder = cfg.pedPh; $('rRastreio').placeholder = cfg.rasPh;
+  $('rDica').textContent = cfg.dica;
+  $('rCanal').innerHTML = CANAIS.map(c => `<button class="chip ${c.id === id ? 'on' : ''}" data-v="${c.id}">${c.nome}</button>`).join('');
+  $('rCanal').querySelectorAll('.chip').forEach(b => b.onclick = () => setCanal(b.dataset.v, true));
+}
+// escolhe o tipo pela leitura: primeiro pelos códigos, depois pelo texto da foto
+function autoCanal(texto) {
+  const c = Parser.canalDoCodigo($('rRastreio').value) || Parser.canalDoCodigo($('rPedido').value) || (texto && Parser.canalDoTexto(texto));
+  if (c) setCanal(c);
+}
+function faltando() { return faltaPara(rCanal, Parser.limpaCodigo($('rPedido').value), Parser.limpaCodigo($('rRastreio').value)); }
+function precisaOCR() {
+  const p = $('rPedido').value, r = $('rRastreio').value;
+  if (rCanal === 'correios') return !r;
+  if (rCanal === 'ml') return !p;
+  return !p || !r;
+}
 function montarReceber() {
-  rFotos = []; rCaixa = '';
+  rFotos = []; rCaixa = ''; rCanalManual = false; setCanal('shopee');
   ['rPedido', 'rRastreio', 'rObs'].forEach(i => $(i).value = '');
   $('rLido').textContent = ''; $('rErro').classList.add('hide');
-  $('rAviso').classList.add('hide'); $('rAviso').innerHTML = '';
-  delete $('rPedido').dataset.auto; delete $('rRastreio').dataset.auto;
+  $('rAviso').classList.add('hide'); $('rAviso').innerHTML = ''; $('rSalvar').classList.remove('hide');
+  ['rPedido', 'rRastreio'].forEach(id => { delete $(id).dataset.auto; delete $(id).dataset.duvida; $(id).classList.remove('duvida'); });
+  rDuplicado = null;
   renderFotos();
   $('rCaixas').innerHTML = CAIXAS.map(c => `<div class="caixa" data-c="${c.id}"><b>${c.id}</b><small>${c.desc}</small></div>`).join('');
   $('rCaixas').querySelectorAll('.caixa').forEach(el => el.onclick = () => {
@@ -515,22 +639,43 @@ $('rFile').onchange = async e => {
   const img = await bmp;
   status('Lendo a etiqueta…', true);
   await lerCodigoDeBarras(img, f);
+  autoCanal();
   if (!$('rPedido').value) await pedidoPelaMensagem();
   verificarEspera();
-  if ((!$('rPedido').value || !$('rRastreio').value) && ocrLigado()) lerTextoDaFoto(img);
+  if (precisaOCR() && ocrLigado()) lerTextoDaFoto(img);
   else status();
 };
 
 // Linha de status embaixo dos campos (mostra o que foi lido)
 function status(carregando, spin) {
   const lidos = [];
-  if ($('rRastreio').dataset.auto) lidos.push('rastreio');
-  if ($('rPedido').dataset.auto) lidos.push('pedido');
+  if ($('rPedido').dataset.auto) lidos.push(rCanal === 'ml' ? 'venda' : 'pedido');
+  if ($('rRastreio').dataset.auto) lidos.push(rCanal === 'ml' ? 'envio' : 'rastreio');
   let t = lidos.length ? `✨ Lido da foto: ${lidos.join(' e ')} — confira.` : '';
+  if (camposEmDuvida().length) t = '⚠️ <b>Confira o número marcado em amarelo</b> com a etiqueta — o sistema não tem certeza da leitura.';
   if (carregando) t = (spin ? '<span class="spin" style="width:12px;height:12px"></span> ' : '') + esc(carregando) + (t ? '<br>' + t : '');
   $('rLido').innerHTML = t;
 }
-function preencher(campo, valor) { $(campo).value = valor; $(campo).dataset.auto = '1'; }
+// duvida = true quando a leitura pelo texto da foto não é segura (precisa o funcionário confirmar)
+function preencher(campo, valor, duvida) {
+  $(campo).value = valor; $(campo).dataset.auto = '1';
+  if (duvida) { $(campo).dataset.duvida = '1'; $(campo).classList.add('duvida'); }
+  else { delete $(campo).dataset.duvida; $(campo).classList.remove('duvida'); }
+}
+function camposEmDuvida() { return ['rPedido', 'rRastreio'].filter(id => $(id).dataset.duvida && $(id).value); }
+// confiança do leitor nas palavras que formam o código (0–100), ou null se não souber
+function confiancaDe(data, codigo) {
+  const ws = (data && data.words) || [];
+  const confs = ws.filter(w => { const t = (w.text || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return t.length >= 3 && codigo.includes(t); }).map(w => w.confidence);
+  return confs.length ? Math.min(...confs) : null;
+}
+function leituraDuvidosa(data, codigo, campo) {
+  if (!Parser.apareceExato(data.text, codigo)) return true;      // precisou corrigir letra/número
+  const c = confiancaDe(data, codigo);
+  // na Shopee o número do pedido é o que mais importa: exige mais certeza
+  const minimo = (campo === 'rPedido' && rCanal === 'shopee') ? 90 : 80;
+  return c === null ? (campo === 'rPedido' && rCanal === 'shopee') : c < minimo;
+}
 
 // Abre a foto já em tamanho menor (bem mais rápido no celular do que abrir os 12 MP inteiros)
 async function decodificar(file, lado = 1600) {
@@ -545,18 +690,57 @@ async function msgsEsperando(pedido, rastreio) {
   const { data } = await sb.from('mensagens').select('*').is('pacote_id', null).or(filtros).order('criado_em', { ascending: false });
   return data || [];
 }
-async function verificarEspera() {
-  const msgs = await msgsEsperando(Parser.limpaCodigo($('rPedido').value), Parser.limpaCodigo($('rRastreio').value));
-  if (!msgs.length) { $('rAviso').classList.add('hide'); return; }
-  const m = msgs[0], t = tipos.find(x => x.id === m.tipo_id);
-  $('rAviso').innerHTML = `<div class="aviso-msg">
-    <div class="big">🔔 Este pacote já tem mensagem esperando!</div>
-    <div style="margin:6px 0">${tipoTag(m.tipo_id)}${lojaTag(m.loja_id)}${prazoTag(m.prazo)}</div>
-    <div class="mut">${esc(m.produto || '')}${m.motivo ? ' · ' + esc(m.motivo) : ''}</div>
-    ${t && t.instrucao ? `<div class="alert" style="margin-bottom:0">👉 ${esc(t.instrucao)}</div>` : ''}
+// Procura pacote já lançado com o mesmo pedido ou rastreio (pendente ou resolvido)
+async function acharDuplicado(pedido, rastreio, ignorarId) {
+  const filtros = [pedido && `pedido.eq.${pedido}`, rastreio && `rastreio.eq.${rastreio}`].filter(Boolean).join(',');
+  if (!filtros) return null;
+  let q = sb.from('pacotes').select('*').or(filtros).order('criado_em', { ascending: false }).limit(1);
+  if (ignorarId) q = q.neq('id', ignorarId);
+  const { data } = await q;
+  return data && data.length ? data[0] : null;
+}
+let rDuplicado = null;
+async function caixaDuplicado(p) {
+  const th = p.fotos && p.fotos.length ? (await urls([p.fotos[0]]))[0] : '';
+  const res = p.status === 'resolvido';
+  return `<div class="dup-box">
+    <div class="big">🚫 Pacote DUPLICADO — já foi lançado!</div>
+    <p style="margin:6px 0 10px">Não é possível lançar de novo. Este é o lançamento que já existe:</p>
+    <div class="pk" style="background:#fff;border-radius:10px;padding:10px" onclick="abrirPacote(${p.id})">
+      <div class="th">${th ? `<img src="${th}">` : ''}</div>
+      <div class="inf">
+        <div class="cod">${esc(p.codigo)} <span class="mut" style="font-weight:400">caixa ${nomeCaixa(p.caixa)}</span></div>
+        <div class="kv" style="margin-top:4px">
+          <b>${p.canal === 'ml' ? 'Venda' : 'Pedido'}</b><span class="mono">${esc(p.pedido || '—')}</span>
+          <b>${p.canal === 'ml' ? 'Envio' : 'Rastreio'}</b><span class="mono">${esc(p.rastreio || '—')}</span>
+          <b>Lançado</b><span>${fmtDataHora(p.criado_em)}${p.criado_por ? ' · ' + esc(p.criado_por) : ''}</span>
+          <b>Situação</b><span>${res ? `✅ resolvido ${fmtDataHora(p.resolvido_em)}` : '📦 pendente na caixa'}</span>
+        </div>
+        <div>${canalTag(p.canal)}${lojaTag(p.loja_id)}</div>
+      </div>
+    </div>
+    <button class="btn sec" style="margin-top:10px" onclick="abrirPacote(${p.id})">Ver o pacote já lançado</button>
   </div>`;
-  $('rAviso').classList.remove('hide');
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+async function verificarEspera() {
+  const pedido = Parser.limpaCodigo($('rPedido').value), rastreio = Parser.limpaCodigo($('rRastreio').value);
+  const [dup, msgs] = await Promise.all([acharDuplicado(pedido, rastreio), msgsEsperando(pedido, rastreio)]);
+  rDuplicado = dup;
+  let html = '';
+  if (dup) html += await caixaDuplicado(dup);
+  else if (msgs.length) {
+    const m = msgs[0], t = tipos.find(x => x.id === m.tipo_id);
+    html += `<div class="aviso-msg">
+      <div class="big">🔔 Este pacote já tem mensagem esperando!</div>
+      <div style="margin:6px 0">${tipoTag(m.tipo_id)}${lojaTag(m.loja_id)}${prazoTag(m.prazo)}</div>
+      <div class="mut">${esc(m.produto || '')}${m.motivo ? ' · ' + esc(m.motivo) : ''}</div>
+      ${t && t.instrucao ? `<div class="alert" style="margin-bottom:0">👉 ${esc(t.instrucao)}</div>` : ''}
+    </div>`;
+  }
+  $('rAviso').innerHTML = html;
+  $('rAviso').classList.toggle('hide', !html);
+  $('rSalvar').classList.toggle('hide', !!dup);
+  if (html) window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // Se o rastreio já foi lido e existe mensagem guardada com ele, puxa o pedido da mensagem
@@ -599,18 +783,22 @@ async function lerTextoDaFoto(img) {
   status('Procurando os números na foto…', true);
   try {
     const w = await pegarOCR();
-    if ($('rPedido').value && $('rRastreio').value) { if (minha === ocrFila) status(); return; }
+    if (!precisaOCR()) { if (minha === ocrFila) status(); return; }
     const { data } = await w.recognize(await imagemParaOCR(img));
     if (minha !== ocrFila) return;
     const ped = Parser.pedidoDoOCR(data.text), ras = Parser.rastreioDoOCR(data.text);
-    if (ped && !$('rPedido').value) preencher('rPedido', ped);
-    if (ras && !$('rRastreio').value) preencher('rRastreio', ras);
-    if (!$('rPedido').value) status('Não consegui ler o pedido nesta foto. Tire outra mais de perto ou digite.');
-    else status();
+    autoCanal(data.text);   // decide o tipo antes, para saber quanta certeza exigir
+    if (ped && !$('rPedido').value) preencher('rPedido', ped, leituraDuvidosa(data, ped, 'rPedido'));
+    if (ras && !$('rRastreio').value) preencher('rRastreio', ras, leituraDuvidosa(data, ras, 'rRastreio'));
+    autoCanal(data.text);
+    const falta = faltando();
+    status(falta ? `Não consegui ler ${falta} nesta foto. Tire outra mais de perto ou digite.` : '');
+    if (camposEmDuvida().length) status();
     verificarEspera();
   } catch (e) {
     console.error(e);
-    if (minha === ocrFila) status($('rPedido').value ? '' : 'Não consegui ler o pedido na foto. Digite, por favor.');
+    const falta = faltando();
+    if (minha === ocrFila) status(falta ? `Não consegui ler ${falta} na foto. Digite, por favor.` : '');
   }
 }
 
@@ -634,7 +822,16 @@ async function pegarDetector() {
 async function lerCodigoDeBarras(img, file) {
   if (!('BarcodeDetector' in window)) return;
   const aplicar = codes => {
+    const numericos = [];
     for (const c of codes) {
+      const raw = (c.rawValue || '').trim();
+      // QR do Mercado Livre costuma trazer {"id":"44836527759", ...}
+      if (raw.startsWith('{')) {
+        try { const o = JSON.parse(raw); const id = String(o.id || o.shipment_id || ''); if (/^\d{10,12}$/.test(id) && !$('rRastreio').value) preencher('rRastreio', id); } catch {}
+        continue;
+      }
+      // número puro de 10–12 dígitos = envio do ML (só usa se não houver outro rastreio na etiqueta)
+      if (/^\d{10,12}$/.test(raw)) { numericos.push(raw); continue; }
       const v = Parser.limpaCodigo(c.rawValue);
       let tipo = Parser.classificaCodigo(v);
       // alguns QR codes trazem mais texto: procura os números dentro
@@ -647,6 +844,7 @@ async function lerCodigoDeBarras(img, file) {
       if (tipo === 'rastreio' && !$('rRastreio').value) preencher('rRastreio', v);
       if (tipo === 'pedido' && !$('rPedido').value) preencher('rPedido', v);
     }
+    if (numericos.length && !$('rRastreio').value) preencher('rRastreio', numericos[0]);
   };
   try {
     const det = await pegarDetector();
@@ -661,12 +859,13 @@ async function lerCodigoDeBarras(img, file) {
 }
 
 // Se colar um rastreio no campo de pedido (ou vice-versa), corrige sozinho
-['rPedido', 'rRastreio'].forEach(id => $(id).addEventListener('input', () => { delete $(id).dataset.auto; }));
+['rPedido', 'rRastreio'].forEach(id => $(id).addEventListener('input', () => { delete $(id).dataset.auto; delete $(id).dataset.duvida; $(id).classList.remove('duvida'); }));
 ['rPedido', 'rRastreio'].forEach(id => $(id).addEventListener('blur', () => {
   const v = Parser.limpaCodigo($(id).value); $(id).value = v;
   const t = Parser.classificaCodigo(v);
   if (id === 'rPedido' && t === 'rastreio' && !$('rRastreio').value) { $('rRastreio').value = v; $('rPedido').value = ''; }
   if (id === 'rRastreio' && t === 'pedido' && !$('rPedido').value) { $('rPedido').value = v; $('rRastreio').value = ''; }
+  autoCanal();
   verificarEspera();
 }));
 
@@ -684,31 +883,46 @@ $('rSalvar').onclick = async () => {
   const rastreio = Parser.limpaCodigo($('rRastreio').value) || null;
   if (!rFotos.length) return erro('Tire pelo menos uma foto.');
   if (!rCaixa) return erro('Escolha a caixa (P, M ou G).');
-  if (!pedido) return erro('Preencha o número do pedido.');
+  const falta = faltaPara(rCanal, pedido, rastreio);
+  if (falta) return erro('Preencha ' + falta + '.');
+  // leitura duvidosa: pede para conferir antes de salvar
+  const duv = camposEmDuvida();
+  if (duv.length) return pedirConfirmacaoLeitura(duv);
 
   const btn = $('rSalvar'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Salvando…';
   const caixa = rCaixa, fotos = rFotos.slice(), obs = $('rObs').value.trim() || null;
   try {
     const filtros = [pedido && `pedido.eq.${pedido}`, rastreio && `rastreio.eq.${rastreio}`].filter(Boolean).join(',');
     // tudo ao mesmo tempo, em vez de um depois do outro
-    const [dupR, seq, msgsR] = await Promise.all([
-      sb.from('pacotes').select('codigo').eq('status', 'pendente').or(filtros).limit(1),
+    const [dup, seq, msgsR] = await Promise.all([
+      acharDuplicado(pedido, rastreio),
       proximoSeq(caixa),
       sb.from('mensagens').select('*').is('pacote_id', null).or(filtros),
     ]);
-    const dup = dupR.data, msgs = msgsR.data || [];
-    if (dup && dup.length && !confirm(`Já existe um pacote pendente com esse número (${dup[0].codigo}). Salvar mesmo assim?`)) return;
+    const msgs = msgsR.data || [];
+    if (dup) {   // duplicado: não deixa salvar
+      rDuplicado = dup; $('rAviso').innerHTML = await caixaDuplicado(dup); $('rAviso').classList.remove('hide');
+      $('rSalvar').classList.add('hide'); window.scrollTo({ top: 0, behavior: 'smooth' });
+      return erro(`Pacote duplicado: já foi lançado como ${dup.codigo}. Não é possível lançar de novo.`);
+    }
 
     // os nomes das fotos são definidos agora; o envio acontece em segundo plano
     const dia = new Date().toISOString().slice(0, 10);
     const paths = fotos.map(() => `${dia}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
     const codigo = `${caixa}-${String(seq).padStart(2, '0')}`;
-    const novo = { caixa, seq, codigo, pedido, rastreio, fotos: paths, obs, criado_por: usuario };
+    const novo = { caixa, seq, codigo, pedido, rastreio, fotos: paths, obs, criado_por: usuario, canal: rCanal };
     if (msgs.length) {
       const loja = msgs.find(m => m.loja_id)?.loja_id; if (loja) novo.loja_id = loja;
       if (!novo.rastreio && msgs.find(m => m.rastreio)) novo.rastreio = msgs.find(m => m.rastreio).rastreio;
     }
-    const { data: pk, error } = await sb.from('pacotes').insert(novo).select('id').single();
+    let { data: pk, error } = await sb.from('pacotes').insert(novo).select('id').single();
+    if (error && /canal/i.test(error.message || '')) {   // banco ainda sem a coluna "canal": salva sem ela
+      delete novo.canal; ({ data: pk, error } = await sb.from('pacotes').insert(novo).select('id').single());
+    }
+    if (error && (error.code === '23505' || /duplicate|unico|unique/i.test(error.message || ''))) {
+      await verificarEspera();
+      return erro('Pacote duplicado: este pedido/rastreio acabou de ser lançado por outra pessoa.');
+    }
     if (error) throw error;
     if (msgs.length) sb.from('mensagens').update({ pacote_id: pk.id }).in('id', msgs.map(m => m.id)).then(() => {});
     enviarFotos(fotos, paths, pk.id);   // não espera: já pode ir para a próxima devolução
@@ -735,6 +949,28 @@ $('rSalvar').onclick = async () => {
     btn.disabled = false; btn.textContent = 'Salvar devolução';
   }
 };
+
+// Leitura duvidosa: mostra o número lido grande, ao lado da foto, para o funcionário conferir
+function pedirConfirmacaoLeitura(ids) {
+  const nome = id => id === 'rPedido' ? (rCanal === 'ml' ? 'Número da venda' : 'Número do pedido') : (rCanal === 'ml' ? 'Nº do envio' : 'Rastreio');
+  const foto = rFotos[0] ? `<img src="${rFotos[0].url}" style="width:100%;max-height:260px;object-fit:contain;border-radius:10px;background:#000" onclick="verFoto(this.src)">` : '';
+  abrirModal(`
+    <h2>⚠️ Confira a leitura</h2>
+    <p style="margin-top:0">O sistema leu sozinho, mas <b>não tem certeza</b>. Compare com a etiqueta, letra por letra:</p>
+    ${foto}
+    ${ids.map(id => `<div class="card" style="margin-top:10px;text-align:center">
+      <div class="mut">${nome(id)}</div>
+      <div class="mono" style="font-size:24px;font-weight:800;letter-spacing:2px;word-break:break-all">${esc($(id).value)}</div></div>`).join('')}
+    <div style="display:grid;gap:8px">
+      <button class="btn ok" id="cfLeitura">✓ Está certo, pode salvar</button>
+      <button class="btn sec" id="cfCorrigir">✏️ Está errado, vou corrigir</button>
+    </div>`);
+  $('cfLeitura').onclick = () => {
+    ids.forEach(id => { delete $(id).dataset.duvida; $(id).classList.remove('duvida'); });
+    fecharModal(); status(); $('rSalvar').click();
+  };
+  $('cfCorrigir').onclick = () => { fecharModal(); const el = $(ids[0]); el.focus(); el.select(); el.scrollIntoView({ block: 'center' }); };
+}
 
 /* ---------- envio das fotos em segundo plano ---------- */
 let envios = 0;
@@ -787,25 +1023,33 @@ async function renderLista() {
   q = status === 'resolvido' ? q.order('resolvido_em', { ascending: false }).limit(100) : q.order('criado_em', { ascending: true });
   const { data: pks, error } = await q;
   if (error) { $('lista').innerHTML = `<div class="alert err">${esc(error.message)}</div>`; return; }
-  if (!pks.length) { $('lista').innerHTML = `<div class="empty">${status === 'pendente' ? 'Nenhum pacote pendente 🎉' : 'Nada resolvido ainda.'}</div>`; return; }
+  $('fSit').classList.toggle('hide', status !== 'pendente');
+  if (!pks.length) { $('fSit').innerHTML = ''; $('lista').innerHTML = `<div class="empty">${status === 'pendente' ? 'Nenhum pacote pendente 🎉' : 'Nada resolvido ainda.'}</div>`; return; }
 
   const { data: msgs } = await sb.from('mensagens').select('*').in('pacote_id', pks.map(p => p.id)).order('criado_em', { ascending: false });
   const porPk = {}; (msgs || []).forEach(m => (porPk[m.pacote_id] = porPk[m.pacote_id] || []).push(m));
 
+  const sit = {}; pks.forEach(p => sit[p.id] = situacao(porPk[p.id]));
+  let lista = pks;
   if (status === 'pendente') {
-    // com prazo primeiro (mais urgente), depois com mensagem, depois o resto
-    const chave = p => {
-      const m = (porPk[p.id] || [])[0];
-      if (m && m.prazo) return [0, diasAte(m.prazo)];
-      if (m) return [1, (tipos.find(t => t.id === m.tipo_id) || {}).urgencia || 9];
-      return [2, 0];
-    };
-    pks.sort((a, b) => { const A = chave(a), B = chave(b); return A[0] - B[0] || A[1] - B[1]; });
+    // filtro por situação do prazo
+    const cont = k => pks.filter(p => k === 'venc' ? sit[p.id].k === 'venc' : k === 'prazo' ? ['hoje', 'ok'].includes(sit[p.id].k) : ['sem', 'semdata'].includes(sit[p.id].k)).length;
+    const ops = [['', 'Todos'], ['venc', `⛔ Vencidos (${cont('venc')})`], ['prazo', `🟢 No prazo (${cont('prazo')})`], ['sem', `⏳ Sem prazo (${cont('sem')})`]];
+    $('fSit').innerHTML = ops.map(([v, t]) => `<button class="chip ${filtroSit === v ? 'on' : ''}" data-v="${v}">${t}</button>`).join('');
+    $('fSit').querySelectorAll('.chip').forEach(b => b.onclick = () => { filtroSit = b.dataset.v; renderLista(); });
+    if (filtroSit === 'venc') lista = pks.filter(p => sit[p.id].k === 'venc');
+    if (filtroSit === 'prazo') lista = pks.filter(p => ['hoje', 'ok'].includes(sit[p.id].k));
+    if (filtroSit === 'sem') lista = pks.filter(p => ['sem', 'semdata'].includes(sit[p.id].k));
+    // vence hoje, depois no prazo (mais perto primeiro), depois vencidos, depois sem prazo
+    lista.sort((a, b) => sit[a.id].ord - sit[b.id].ord || (sit[a.id].d ?? 0) - (sit[b.id].d ?? 0));
+    if (!lista.length) { $('lista').innerHTML = '<div class="empty">Nenhum pacote nesta situação.</div>'; return; }
   }
+  $('fSit').classList.toggle('hide', status !== 'pendente');
+  const pksTodos = pks;
 
-  const thumbs = await urls(pks.filter(p => p.fotos.length).map(p => p.fotos[0]));
+  const thumbs = await urls(lista.filter(p => p.fotos.length).map(p => p.fotos[0]));
   let ti = 0;
-  $('lista').innerHTML = pks.map(p => {
+  $('lista').innerHTML = lista.map(p => {
     const m = (porPk[p.id] || [])[0];
     const th = p.fotos.length ? `<img src="${thumbs[ti++]}" loading="lazy">` : '';
     return `<div class="card pk" data-id="${p.id}">
@@ -813,7 +1057,8 @@ async function renderLista() {
       <div class="inf">
         <div class="cod">${esc(p.codigo)} <span class="mut" style="font-weight:400">caixa ${nomeCaixa(p.caixa)}</span></div>
         <div class="mono">${esc(p.pedido || '')}${p.pedido && p.rastreio ? ' · ' : ''}${esc(p.rastreio || '')}</div>
-        <div>${lojaTag(p.loja_id)}${m ? tipoTag(m.tipo_id) + prazoTag(m.prazo) : '<span class="mut">sem mensagem ainda</span>'}</div>
+        ${status === 'pendente' ? situacaoHtml(sit[p.id]) : ''}
+        <div>${canalTag(p.canal)}${lojaTag(p.loja_id)}${m ? tipoTag(m.tipo_id) : ''}</div>
         <div class="mut">${status === 'resolvido' ? 'resolvido ' + fmtDataHora(p.resolvido_em) : 'chegou ' + fmtDataHora(p.criado_em)}</div>
         ${status === 'pendente' ? `<button class="btn ok sm" style="margin-top:8px" data-res="${p.id}">✓ Resolvido</button>` : ''}
       </div></div>`;
@@ -821,7 +1066,7 @@ async function renderLista() {
   $('lista').querySelectorAll('.pk').forEach(el => el.onclick = () => abrirPacote(+el.dataset.id));
   $('lista').querySelectorAll('[data-res]').forEach(el => el.onclick = e => {
     e.stopPropagation();
-    const p = pks.find(x => x.id === +el.dataset.res);
+    const p = pksTodos.find(x => x.id === +el.dataset.res);
     confirmarResolvido(p);
   });
 }
@@ -837,7 +1082,8 @@ async function abrirPacote(id) {
   const resolvido = p.status === 'resolvido';
   abrirModal(`
     <div class="row"><div class="codigo" style="text-align:left">${esc(p.codigo)}</div><button class="btn sec sm" style="flex:none" onclick="fecharModal()">Fechar</button></div>
-    <p style="margin-top:0">Caixa <b>${nomeCaixa(p.caixa)}</b> ${lojaTag(p.loja_id)} ${resolvido ? '<span class="tag" style="background:#16a34a">resolvido</span>' : ''}</p>
+    <p style="margin-top:0">Caixa <b>${nomeCaixa(p.caixa)}</b> ${canalTag(p.canal)}${lojaTag(p.loja_id)} ${resolvido ? '<span class="tag" style="background:#16a34a">resolvido</span>' : ''}</p>
+    ${resolvido ? '' : situacaoHtml(situacao(msgs))}
     ${fotos.length ? `<div class="fotos">${fotos.map(u => `<div class="foto"><img src="${u}" onclick="verFoto(this.src)"></div>`).join('')}</div>` : `<p class="mut">${p.fotos_apagadas ? 'Fotos apagadas automaticamente (resolvido há tempo).' : 'Sem fotos.'}</p>`}
     <div class="card" style="margin-top:12px">
       <div class="kv">
@@ -908,8 +1154,9 @@ async function editarPacote(id) {
   const { data: p } = await sb.from('pacotes').select('*').eq('id', id).single();
   abrirModal(`
     <h2>Editar ${esc(p.codigo)}</h2>
-    <label>Pedido</label><input type="text" id="ePed" class="cod-in" value="${esc(p.pedido || '')}">
-    <label>Rastreio (opcional)</label><input type="text" id="eRas" class="cod-in" value="${esc(p.rastreio || '')}">
+    <label>Tipo de etiqueta</label><select id="eCanal">${CANAIS.map(c => `<option value="${c.id}" ${c.id === (p.canal || 'shopee') ? 'selected' : ''}>${c.nome}</option>`).join('')}</select>
+    <label>Pedido / venda</label><input type="text" id="ePed" class="cod-in" value="${esc(p.pedido || '')}">
+    <label>Rastreio / envio</label><input type="text" id="eRas" class="cod-in" value="${esc(p.rastreio || '')}">
     <label>Loja</label><select id="eLoja"><option value="">—</option>${lojas.map(l => `<option value="${l.id}" ${l.id === p.loja_id ? 'selected' : ''}>${esc(l.nome)}</option>`).join('')}</select>
     <label>Caixa (mudar a caixa gera um código novo)</label>
     <select id="eCx">${CAIXAS.map(c => `<option value="${c.id}" ${c.id === p.caixa ? 'selected' : ''}>${c.id} · ${c.desc}</option>`).join('')}</select>
@@ -919,8 +1166,12 @@ async function editarPacote(id) {
       <button class="btn sec" onclick="abrirPacote(${id})">Cancelar</button>
     </div>`);
   $('eSalvar').onclick = async () => {
-    if (!Parser.limpaCodigo($('ePed').value)) return toast('O número do pedido é obrigatório');
+    const falta = faltaPara($('eCanal').value, Parser.limpaCodigo($('ePed').value), Parser.limpaCodigo($('eRas').value));
+    if (falta) return toast('Preencha ' + falta);
+    const dupE = await acharDuplicado(Parser.limpaCodigo($('ePed').value), Parser.limpaCodigo($('eRas').value), id);
+    if (dupE) return toast(`🚫 Duplicado: esse número já está no pacote ${dupE.codigo} (${dupE.status}). Não foi salvo.`, 5000);
     const upd = {
+      canal: $('eCanal').value,
       pedido: Parser.limpaCodigo($('ePed').value) || null,
       rastreio: Parser.limpaCodigo($('eRas').value) || null,
       loja_id: $('eLoja').value ? +$('eLoja').value : null,
@@ -930,7 +1181,8 @@ async function editarPacote(id) {
       upd.caixa = $('eCx').value; upd.seq = await proximoSeq(upd.caixa);
       upd.codigo = `${upd.caixa}-${String(upd.seq).padStart(2, '0')}`;
     }
-    const { error } = await sb.from('pacotes').update(upd).eq('id', id);
+    let { error } = await sb.from('pacotes').update(upd).eq('id', id);
+    if (error && /canal/i.test(error.message || '')) { delete upd.canal; ({ error } = await sb.from('pacotes').update(upd).eq('id', id)); }
     if (error) return toast('Erro: ' + error.message);
     if (upd.codigo) toast(`Novo código: ${upd.codigo} — reescreva no pacote`, 4000);
     abrirPacote(id); if (pagina === 'pendentes' || pagina === 'resolvidos') renderLista();
@@ -1002,7 +1254,7 @@ async function processarMensagem(texto) {
     if (Object.keys(upd).length) await sb.from('pacotes').update(upd).eq('id', pk.id);
   }
 
-  const cab = `${r.tipo ? `<span class="tag" style="background:${esc(r.tipo.cor)}">${esc(r.tipo.nome)}</span>` : ''}${r.loja ? `<span class="tag" style="background:${esc(r.loja.cor)}">${esc(r.loja.nome)}</span>` : ''}${prazoTag(r.prazo)}`;
+  const cab = `${canalTag(r.canal)}${r.tipo ? `<span class="tag" style="background:${esc(r.tipo.cor)}">${esc(r.tipo.nome)}</span>` : ''}${r.loja ? `<span class="tag" style="background:${esc(r.loja.cor)}">${esc(r.loja.nome)}</span>` : ''}${prazoTag(r.prazo)}`;
   const det = `<div class="mut" style="margin-top:6px">${esc(r.produto || '')}${r.motivo ? ' · ' + esc(r.motivo) : ''}</div><div class="mono">${esc(r.pedido || '')} ${esc(r.rastreio || '')}</div>`;
   const instr = r.tipo && r.tipo.instrucao ? `<div class="alert">👉 ${esc(r.tipo.instrucao)}</div>` : '';
 
@@ -1068,14 +1320,17 @@ function editarTipo(id) {
     <label>Cor</label><input type="color" id="tCor" value="${esc(t.cor)}" style="width:80px;height:44px;border:0;background:none">
     <label>Urgência (1 = mais urgente, 5 = menos)</label><input type="number" id="tUrg" min="1" max="5" value="${t.urgencia}">
     <label>O que fazer (lembrete que aparece junto)</label><textarea id="tInst" style="min-height:80px">${esc(t.instrucao || '')}</textarea>
+    <label style="display:flex;align-items:center;gap:10px;color:var(--tx);font-size:15px;margin-top:14px"><input type="checkbox" id="tVenc" style="width:22px;height:22px" ${tipoVencido(t) ? 'checked' : ''}> Esta mensagem quer dizer que o <b>prazo já acabou</b> (pacote vencido)</label>
     <div style="display:grid;gap:8px;margin-top:14px">
       <button class="btn" id="tSalvar">Salvar</button>
       ${id ? `<button class="btn err" id="tDel">Excluir tipo</button>` : ''}
       <button class="btn sec" onclick="fecharModal()">Cancelar</button></div>`);
   $('tSalvar').onclick = async () => {
-    const d = { nome: $('tNome').value.trim(), palavra_chave: $('tChave').value.trim(), cor: $('tCor').value, urgencia: +$('tUrg').value || 3, instrucao: $('tInst').value.trim() || null, ordem: t.ordem };
+    const d = { nome: $('tNome').value.trim(), palavra_chave: $('tChave').value.trim(), cor: $('tCor').value, urgencia: +$('tUrg').value || 3, instrucao: $('tInst').value.trim() || null, ordem: t.ordem, marca_vencido: $('tVenc').checked };
     if (!d.nome || !d.palavra_chave) return toast('Preencha nome e palavra-chave');
-    const { error } = id ? await sb.from('tipos_mensagem').update(d).eq('id', id) : await sb.from('tipos_mensagem').insert(d);
+    const grava = () => id ? sb.from('tipos_mensagem').update(d).eq('id', id) : sb.from('tipos_mensagem').insert(d);
+    let { error } = await grava();
+    if (error && /marca_vencido/i.test(error.message || '')) { delete d.marca_vencido; ({ error } = await grava()); }
     if (error) return toast('Erro: ' + error.message);
     await carregarConfig(); fecharModal(); renderCfg(); toast('Salvo');
   };
