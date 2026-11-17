@@ -89,6 +89,7 @@ textarea{min-height:180px;resize:vertical}
 .aviso-msg{background:#fef2f2;border:2px solid var(--err);border-radius:14px;padding:14px;margin-bottom:12px}
 .aviso-msg .big{color:#991b1b}
 .cod-in{text-transform:uppercase}
+.semfoto{width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;font-size:11px;line-height:1.2;color:#92400e;background:#fef3c7;border-radius:10px}
 .cod-in.duvida{border:2px solid #f59e0b;background:#fffbeb}
 .dup-box{background:#fef2f2;border:2px solid var(--err);border-radius:14px;padding:14px;margin-bottom:12px}
 .dup-box .big{color:#991b1b}
@@ -235,9 +236,14 @@ const Parser = (() => {
   const RE_VENDA_ML = /\b(2000\d{12})\b/g;
   const RE_ENVIO_ML = /(?:ENVIO|SHIPMENT)\D{0,20}?(?<![A-Z0-9])(\d{10,12})\b/g;
 
+  // os 6 primeiros dígitos do pedido Shopee são a data (AAMMDD) — evita confundir com outros números
+  function dataValida(seis) {
+    const a = +seis.slice(0, 2), m = +seis.slice(2, 4), d = +seis.slice(4, 6);
+    return a >= 20 && a <= 39 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  }
   function codigos(texto) {
     const up = (texto || '').toUpperCase();
-    const pedidos = [...new Set([...up.matchAll(RE_PEDIDO), ...up.matchAll(RE_VENDA_ML)].map(m => m[1]))];
+    const pedidos = [...new Set([...[...up.matchAll(RE_PEDIDO)].filter(m => dataValida(m[1])), ...up.matchAll(RE_VENDA_ML)].map(m => m[1]))];
     const rastreios = [];
     RE_RASTREIOS.forEach(re => [...up.matchAll(re)].forEach(m => { if (!rastreios.includes(m[1])) rastreios.push(m[1]); }));
     [...up.matchAll(RE_ENVIO_ML)].forEach(m => { if (!rastreios.includes(m[1])) rastreios.push(m[1]); });
@@ -264,7 +270,7 @@ const Parser = (() => {
     c = limpaCodigo(c);
     if (!c) return null;
     if (RE_RASTREIOS.some(re => new RegExp('^' + re.source.replace(/\\b/g, '') + '$').test(c))) return 'rastreio';
-    if (new RegExp('^' + RE_PEDIDO.source.replace(/\\b/g, '') + '$').test(c)) return 'pedido';
+    if (new RegExp('^' + RE_PEDIDO.source.replace(/\\b/g, '') + '$').test(c) && dataValida(c)) return 'pedido';
     if (/^2000\d{12}$/.test(c)) return 'pedido';          // venda Mercado Livre
     if (/^\d{10,12}$/.test(c)) return 'rastreio';         // nº do envio Mercado Livre
     return null;
@@ -414,12 +420,19 @@ const Parser = (() => {
     return r;
   }
 
+  // Nº do envio do Mercado Livre no texto da foto (11 dígitos começando com 4), só em etiqueta do ML
+  function envioDoOCR(texto) {
+    if (canalDoTexto(texto) !== 'ml' && !/ENVIO/i.test(texto || '')) return null;
+    const up = (texto || '').toUpperCase();
+    const m = up.match(/ENVIO\D{0,6}(4\d{10})(?!\d)/) || up.match(/(?<!\d)(4\d{10})(?!\d)/);
+    return m ? m[1] : null;
+  }
   // true se o código aparece igualzinho no texto lido (sem precisar corrigir letra/número)
   function apareceExato(texto, codigo) {
     const junto = (texto || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     return !!codigo && junto.includes(codigo);
   }
-  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR, rastreioDoOCR, canalDoCodigo, canalDoTexto, apareceExato };
+  return { ler, dividir, codigos, classificaCodigo, limpaCodigo, semAcento, pedidoDoOCR, rastreioDoOCR, canalDoCodigo, canalDoTexto, apareceExato, envioDoOCR };
 })();
 if (typeof module !== 'undefined') module.exports = Parser;
 </script>
@@ -512,14 +525,36 @@ function prazoTag(iso) {
 const tipoTag = id => { const t = tipos.find(x => x.id === id); return t ? `<span class="tag" style="background:${esc(t.cor)}">${esc(t.nome)}</span>` : ''; };
 const lojaTag = id => { const l = lojas.find(x => x.id === id); return l ? `<span class="tag" style="background:${esc(l.cor)}">${esc(l.nome)}</span>` : ''; };
 
+const caminhoDaUrl = {};
 async function urls(paths) {
-  const falta = paths.filter(p => !urlCache[p]);
+  const agora = Date.now();
+  // o link de cada foto vale 6 h; renova antes de vencer (o site pode ficar aberto o dia todo)
+  const falta = paths.filter(p => !urlCache[p] || agora - urlCache[p].t > 5 * 3600 * 1000);
   if (falta.length) {
     const { data } = await sb.storage.from(BUCKET).createSignedUrls(falta, 3600 * 6);
-    (data || []).forEach(d => { if (d.signedUrl) urlCache[d.path] = d.signedUrl; });
+    (data || []).forEach(d => { if (d.signedUrl) { urlCache[d.path] = { u: d.signedUrl, t: agora }; caminhoDaUrl[d.signedUrl] = d.path; } });
   }
-  return paths.map(p => urlCache[p] || '');
+  return paths.map(p => urlCache[p] ? urlCache[p].u : '');
 }
+// Se uma foto não carregar: tenta um link novo; se a foto não existe no servidor, mostra aviso no lugar do quadro quebrado
+function semFoto(img) {
+  const d = document.createElement('div'); d.className = 'semfoto';
+  d.innerHTML = '📷<br>foto não<br>enviada';
+  d.title = 'A foto não chegou ao servidor (celular bloqueou ou ficou sem internet). Abra o pacote e use "Adicionar foto".';
+  img.replaceWith(d);
+}
+document.addEventListener('error', async e => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || img.id === 'viewerImg') return;
+  const src = img.getAttribute('src') || '';
+  if (!src) return semFoto(img);
+  const path = caminhoDaUrl[src];
+  if (!path) return;
+  if (img.dataset.tentou) return semFoto(img);
+  img.dataset.tentou = '1'; delete urlCache[path];
+  const [u] = await urls([path]);
+  if (u && u !== src) img.src = u; else semFoto(img);
+}, true);
 
 /* ================= LOGIN ================= */
 async function iniciar() {
@@ -547,6 +582,7 @@ async function entrou(user) {
   montarReceber();
   atualizarBadge();
   limparFotosAntigas();
+  processarFila();
   if (ocrLigado()) (window.requestIdleCallback || (f => setTimeout(f, 3000)))(() => pegarOCR().catch(() => {}));
 }
 $('cSair').onclick = async () => { await sb.auth.signOut(); location.reload(); };
@@ -604,7 +640,7 @@ function faltando() { return faltaPara(rCanal, Parser.limpaCodigo($('rPedido').v
 function precisaOCR() {
   const p = $('rPedido').value, r = $('rRastreio').value;
   if (rCanal === 'correios') return !r;
-  if (rCanal === 'ml') return !p;
+  if (rCanal === 'ml') return !p && !r;
   return !p || !r;
 }
 function montarReceber() {
@@ -786,7 +822,7 @@ async function lerTextoDaFoto(img) {
     if (!precisaOCR()) { if (minha === ocrFila) status(); return; }
     const { data } = await w.recognize(await imagemParaOCR(img));
     if (minha !== ocrFila) return;
-    const ped = Parser.pedidoDoOCR(data.text), ras = Parser.rastreioDoOCR(data.text);
+    const ped = Parser.pedidoDoOCR(data.text), ras = Parser.rastreioDoOCR(data.text) || Parser.envioDoOCR(data.text);
     autoCanal(data.text);   // decide o tipo antes, para saber quanta certeza exigir
     if (ped && !$('rPedido').value) preencher('rPedido', ped, leituraDuvidosa(data, ped, 'rPedido'));
     if (ras && !$('rRastreio').value) preencher('rRastreio', ras, leituraDuvidosa(data, ras, 'rRastreio'));
@@ -973,34 +1009,80 @@ function pedirConfirmacaoLeitura(ids) {
 }
 
 /* ---------- envio das fotos em segundo plano ---------- */
+// As fotos ficam guardadas no próprio celular (fila) até chegarem ao servidor.
+// Se o celular bloquear, trocar de app ou ficar sem internet, o envio continua na próxima vez que o site abrir.
+const fila = {
+  db: null,
+  async abrir() {
+    if (this.db) return this.db;
+    this.db = await new Promise((ok, erro) => {
+      const r = indexedDB.open('devolucoes-fila', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('fotos', { keyPath: 'path' });
+      r.onsuccess = () => ok(r.result); r.onerror = () => erro(r.error);
+    });
+    return this.db;
+  },
+  async op(modo, fn) {
+    const db = await this.abrir();
+    return new Promise((ok, erro) => {
+      const tx = db.transaction('fotos', modo); const req = fn(tx.objectStore('fotos'));
+      tx.oncomplete = () => ok(req && req.result); tx.onerror = () => erro(tx.error);
+    });
+  },
+  por(item) { return this.op('readwrite', st => st.put(item)).catch(() => {}); },
+  tirar(path) { return this.op('readwrite', st => st.delete(path)).catch(() => {}); },
+  todos() { return this.op('readonly', st => st.getAll()).catch(() => []); },
+};
 let envios = 0;
-function indicadorEnvio() {
+function indicadorEnvio(texto) {
   let el = $('envioPill');
   if (!el) { el = document.createElement('div'); el.id = 'envioPill'; el.className = 'toast'; el.style.bottom = '140px'; document.body.appendChild(el); }
-  if (envios > 0) { el.innerHTML = `<span class="spin" style="width:12px;height:12px"></span> Enviando fotos… (${envios})`; el.style.display = ''; }
+  if (texto) { el.innerHTML = texto; el.style.display = ''; return; }
+  if (envios > 0) { el.innerHTML = `<span class="spin" style="width:12px;height:12px"></span> Enviando fotos… (${envios}) — não feche o site`; el.style.display = ''; }
   else el.style.display = 'none';
+}
+async function subir(path, blob) {
+  for (let t = 0; t < 3; t++) {
+    const { error } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+    if (!error) return true;
+    await new Promise(r => setTimeout(r, 1500 * (t + 1)));
+  }
+  return false;
 }
 async function enviarFotos(fotos, paths, pacoteId) {
   envios += fotos.length; indicadorEnvio();
-  const falhas = [];
+  let falhas = 0;
   await Promise.all(fotos.map(async (f, i) => {
     try {
       await f.pronto;
-      let ok = false;
-      for (let t = 0; t < 3 && !ok; t++) {
-        const { error } = await sb.storage.from(BUCKET).upload(paths[i], f.blob, { contentType: 'image/jpeg', upsert: true });
-        ok = !error; if (!ok) await new Promise(r => setTimeout(r, 1500 * (t + 1)));
-      }
-      if (!ok) falhas.push(paths[i]); else URL.revokeObjectURL(f.url);
-    } catch { falhas.push(paths[i]); }
+      await fila.por({ path: paths[i], blob: f.blob, pacoteId, criado: Date.now() });   // guarda antes de enviar
+      if (await subir(paths[i], f.blob)) { await fila.tirar(paths[i]); URL.revokeObjectURL(f.url); }
+      else falhas++;
+    } catch { falhas++; }
     finally { envios--; indicadorEnvio(); }
   }));
-  if (falhas.length) {
-    const resta = paths.filter(p => !falhas.includes(p));
-    await sb.from('pacotes').update({ fotos: resta }).eq('id', pacoteId);
-    toast(`⚠️ ${falhas.length} foto(s) não foram enviadas (sem internet?). O pacote foi salvo; tire a foto de novo pelo Editar se precisar.`, 6000);
-  }
+  if (falhas) toast(`⚠️ ${falhas} foto(s) ainda não subiram (internet fraca). Ficaram guardadas neste celular e vão subir sozinhas.`, 6000);
 }
+// Reenvia o que ficou na fila (ao abrir o site, ao voltar a internet e de tempos em tempos)
+let processandoFila = false;
+async function processarFila() {
+  if (processandoFila || !navigator.onLine) return;
+  processandoFila = true;
+  try {
+    const itens = await fila.todos();
+    if (!itens.length) return;
+    envios += itens.length; indicadorEnvio();
+    for (const it of itens) {
+      try { if (await subir(it.path, it.blob)) await fila.tirar(it.path); }
+      finally { envios--; indicadorEnvio(); }
+    }
+    const resta = (await fila.todos()).length;
+    if (!resta) toast(`✅ ${itens.length} foto(s) pendente(s) enviada(s).`);
+  } finally { processandoFila = false; }
+}
+window.addEventListener('online', processarFila);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') processarFila(); });
+setInterval(processarFila, 60000);
 window.addEventListener('beforeunload', e => { if (envios > 0) { e.preventDefault(); e.returnValue = ''; } });
 
 /* ================= LISTAS ================= */
@@ -1079,12 +1161,17 @@ async function abrirPacote(id) {
     sb.from('mensagens').select('*').eq('pacote_id', id).order('criado_em', { ascending: false }),
   ]);
   const fotos = await urls(p.fotos);
+  const faltando = fotos.filter(u => !u).length;
+  const pendNoCel = (await fila.todos()).filter(it => p.fotos.includes(it.path)).length;
   const resolvido = p.status === 'resolvido';
   abrirModal(`
     <div class="row"><div class="codigo" style="text-align:left">${esc(p.codigo)}</div><button class="btn sec sm" style="flex:none" onclick="fecharModal()">Fechar</button></div>
     <p style="margin-top:0">Caixa <b>${nomeCaixa(p.caixa)}</b> ${canalTag(p.canal)}${lojaTag(p.loja_id)} ${resolvido ? '<span class="tag" style="background:#16a34a">resolvido</span>' : ''}</p>
     ${resolvido ? '' : situacaoHtml(situacao(msgs))}
     ${fotos.length ? `<div class="fotos">${fotos.map(u => `<div class="foto"><img src="${u}" onclick="verFoto(this.src)"></div>`).join('')}</div>` : `<p class="mut">${p.fotos_apagadas ? 'Fotos apagadas automaticamente (resolvido há tempo).' : 'Sem fotos.'}</p>`}
+    ${pendNoCel ? `<div class="alert">⏳ ${pendNoCel} foto(s) deste pacote estão guardadas neste celular, esperando internet para subir.</div>`
+      : faltando ? `<div class="alert">⚠️ ${faltando} foto(s) não chegaram ao servidor (o celular bloqueou ou ficou sem internet na hora). Use <b>📷 Adicionar foto</b> para repor.
+          <button class="btn sec sm" style="margin-top:8px" onclick="limparFotosQuebradas(${p.id})">Remover as fotos quebradas</button></div>` : ''}
     <div class="card" style="margin-top:12px">
       <div class="kv">
         <b>Pedido</b><span class="mono">${esc(p.pedido || '—')}</span>
@@ -1109,6 +1196,7 @@ async function abrirPacote(id) {
       ${resolvido
         ? `<button class="btn sec" onclick="mudarStatus(${p.id},'pendente')">↩️ Voltar para pendentes</button>`
         : `<button class="btn ok" onclick="mudarStatus(${p.id},'resolvido')">✓ Encontrado / Resolvido</button>`}
+      <button class="btn sec" onclick="adicionarFoto(${p.id})">📷 Adicionar foto</button>
       <button class="btn sec" onclick="editarPacote(${p.id})">✏️ Editar</button>
       <button class="btn err" onclick="excluirPacote(${p.id})">🗑️ Excluir</button>
     </div>`);
@@ -1148,6 +1236,33 @@ async function mudarStatus(id, status) {
   atualizarBadge();
   if (pagina === 'pendentes' || pagina === 'resolvidos') renderLista();
   if (pagina === 'msg') $('mRes').querySelectorAll(`[data-pk="${id}"]`).forEach(el => el.outerHTML = '<div class="alert ok">✓ Marcado como resolvido.</div>');
+}
+
+// Tira/escolhe uma foto e acrescenta ao pacote (para repor uma que não chegou)
+function adicionarFoto(id) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.capture = 'environment';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) return;
+    toast('Enviando foto…');
+    const img = await decodificar(f);
+    const blob = await comprimir(img);
+    const path = `${new Date().toISOString().slice(0, 10)}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+    const { data: p } = await sb.from('pacotes').select('fotos').eq('id', id).single();
+    await sb.from('pacotes').update({ fotos: [...(p.fotos || []), path], fotos_apagadas: false }).eq('id', id);
+    await enviarFotos([{ blob, url: '', pronto: Promise.resolve() }], [path], id);
+    abrirPacote(id);
+    if (pagina === 'pendentes' || pagina === 'resolvidos') renderLista();
+  };
+  inp.click();
+}
+// Tira do pacote as fotos que não existem no servidor
+async function limparFotosQuebradas(id) {
+  const { data: p } = await sb.from('pacotes').select('fotos').eq('id', id).single();
+  const { data } = await sb.storage.from(BUCKET).createSignedUrls(p.fotos, 60);
+  const existem = (data || []).filter(d => d.signedUrl).map(d => d.path);
+  await sb.from('pacotes').update({ fotos: p.fotos.filter(x => existem.includes(x)) }).eq('id', id);
+  toast('Fotos quebradas removidas'); abrirPacote(id);
 }
 
 async function editarPacote(id) {
@@ -1237,12 +1352,14 @@ async function processarMensagem(texto) {
 
   // evita salvar a mesma mensagem duas vezes
   const { data: igual } = await sb.from('mensagens').select('id').eq('texto', texto).limit(1);
-  if (!(igual && igual.length)) {
-    await sb.from('mensagens').insert({
+  let msgId = igual && igual.length ? igual[0].id : null;
+  if (!msgId) {
+    const ins = await sb.from('mensagens').insert({
       texto, tipo_id: r.tipo?.id || null, loja_id: r.loja?.id || null,
       pedido: r.pedido, rastreio: r.rastreio, cliente: r.cliente, produto: r.produto, motivo: r.motivo, prazo: r.prazo,
       pacote_id: pk ? pk.id : null, criado_por: usuario,
-    });
+    }).select('id').single();
+    msgId = ins.data ? ins.data.id : null;
   } else if (pk) {
     await sb.from('mensagens').update({ pacote_id: pk.id }).eq('id', igual[0].id);
   }
@@ -1260,7 +1377,8 @@ async function processarMensagem(texto) {
 
   if (!pk) {
     return `<div class="card res nao">${cab}<div class="big" style="margin-top:6px">⏳ Pacote ainda não cadastrado</div>
-      ${det}<p class="mut">Ou ainda não chegou, ou não foi registrado. A mensagem ficou guardada: quando o pacote for cadastrado, o sistema avisa.</p></div>`;
+      ${det}<p class="mut">Ou ainda não chegou, ou não foi registrado. A mensagem ficou guardada: quando o pacote for cadastrado, o sistema avisa.</p>
+      ${msgId ? `<button class="btn sec" onclick="vincularMsg(${msgId})">🔗 Já está aqui? Vincular a um pacote</button>` : ''}</div>`;
   }
   const th = pk.fotos.length ? (await urls([pk.fotos[0]]))[0] : '';
   if (pk.status === 'resolvido') {
@@ -1287,7 +1405,55 @@ async function renderEspera() {
     <div class="mono" style="margin-top:4px">${esc(m.pedido || '')} ${esc(m.rastreio || '')}</div>
     <div class="mut">${esc(m.produto || '')}${m.cliente ? ' · ' + esc(m.cliente) : ''}</div>
     <div class="row" style="margin-top:8px"><span class="mut">colada ${fmtDataHora(m.criado_em)}</span>
+    <button class="btn sec sm" style="flex:none" onclick="vincularMsg(${m.id})">🔗 Vincular</button>
     <button class="btn sec sm" style="flex:none" onclick="apagarMsg(${m.id})">Apagar</button></div></div>`).join('');
+}
+
+// Liga uma mensagem a um pacote escolhido na mão (ex.: devolução do ML que só tem o nº do envio na etiqueta)
+async function vincularMsg(msgId) {
+  abrirModal('<div class="empty"><span class="spin"></span></div>');
+  const [{ data: m }, { data: pks }, { data: comMsg }] = await Promise.all([
+    sb.from('mensagens').select('*').eq('id', msgId).single(),
+    sb.from('pacotes').select('*').eq('status', 'pendente').order('criado_em', { ascending: false }).limit(200),
+    sb.from('mensagens').select('pacote_id').not('pacote_id', 'is', null),
+  ]);
+  const ocupados = new Set((comMsg || []).map(x => x.pacote_id));
+  // primeiro os do mesmo tipo de etiqueta e sem mensagem nenhuma
+  const canalMsg = Parser.canalDoCodigo(m.pedido) || Parser.canalDoCodigo(m.rastreio);
+  const lista = (pks || []).sort((a, b) => ((ocupados.has(a.id) ? 2 : 0) + (a.canal === canalMsg ? 0 : 1)) - ((ocupados.has(b.id) ? 2 : 0) + (b.canal === canalMsg ? 0 : 1)));
+  const thumbs = await urls(lista.filter(p => p.fotos.length).map(p => p.fotos[0]));
+  let ti = 0;
+  abrirModal(`
+    <div class="row"><h2 style="margin:0">🔗 Vincular mensagem</h2><button class="btn sec sm" style="flex:none" onclick="fecharModal()">Fechar</button></div>
+    <div class="card" style="margin-top:10px">${tipoTag(m.tipo_id)}${prazoTag(m.prazo)}
+      <div class="mono" style="margin-top:4px">${esc(m.pedido || '')} ${esc(m.rastreio || '')}</div>
+      <div class="mut">${esc(m.produto || '')}${m.cliente ? ' · ' + esc(m.cliente) : ''}</div></div>
+    <p class="mut">Toque no pacote desta mensagem (confira pela foto da etiqueta: nome, produto…):</p>
+    ${lista.length ? lista.map(p => `<div class="card pk" data-v="${p.id}">
+      <div class="th">${p.fotos.length ? `<img src="${thumbs[ti++]}" onclick="event.stopPropagation();verFoto(this.src)">` : ''}</div>
+      <div class="inf"><div class="cod">${esc(p.codigo)} <span class="mut" style="font-weight:400">caixa ${nomeCaixa(p.caixa)}</span></div>
+        <div class="mono">${esc(p.pedido || '')}${p.pedido && p.rastreio ? ' · ' : ''}${esc(p.rastreio || '')}</div>
+        <div>${canalTag(p.canal)}${ocupados.has(p.id) ? '<span class="mut">já tem mensagem</span>' : ''}</div>
+        <div class="mut">chegou ${fmtDataHora(p.criado_em)}</div></div></div>`).join('') : '<p class="mut">Nenhum pacote pendente.</p>'}`);
+  $('modalBox').querySelectorAll('[data-v]').forEach(el => el.onclick = () => confirmarVinculo(m, lista.find(p => p.id === +el.dataset.v)));
+}
+function confirmarVinculo(m, p) {
+  abrirModal(`<h2>Confirmar vínculo?</h2>
+    <p>A mensagem <b class="mono">${esc(m.pedido || m.rastreio || '')}</b> é do pacote <b>${esc(p.codigo)}</b> (caixa ${nomeCaixa(p.caixa)})?</p>
+    <div style="display:grid;gap:8px">
+      <button class="btn ok" id="vOk">✓ Sim, é este pacote</button>
+      <button class="btn sec" onclick="vincularMsg(${m.id})">Voltar</button></div>`);
+  $('vOk').onclick = async () => {
+    await sb.from('mensagens').update({ pacote_id: p.id }).eq('id', m.id);
+    // completa o pacote com o nº da venda/pedido da mensagem, para as próximas mensagens acharem sozinhas
+    const upd = {};
+    if (!p.pedido && m.pedido) upd.pedido = m.pedido;
+    if (!p.rastreio && m.rastreio) upd.rastreio = m.rastreio;
+    if (!p.loja_id && m.loja_id) upd.loja_id = m.loja_id;
+    if (Object.keys(upd).length) await sb.from('pacotes').update(upd).eq('id', p.id);
+    fecharModal(); toast(`🔗 Vinculado ao ${p.codigo}`);
+    if (pagina === 'msg') { renderEspera(); $('mRes').innerHTML = ''; }
+  };
 }
 async function apagarMsg(id) {
   if (!confirm('Apagar esta mensagem?')) return;
